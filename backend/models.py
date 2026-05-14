@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 @dataclass
@@ -57,10 +57,18 @@ class RosTopicPublishPayload(BaseModel):
 class RosServiceCallPayload(BaseModel):
     name: str
     request: str = ""
-class AudioMonitorConfigEntryPayload(BaseModel):
-    module: str
-    enable: bool
 
 
-class AudioMonitorConfigSavePayload(BaseModel):
-    entries: list[AudioMonitorConfigEntryPayload]
+class ChatMessagePayload(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequestPayload(BaseModel):
+    message: str
+    history: list[ChatMessagePayload] = Field(default_factory=list)
+
+
+class AgentToolCallPayload(BaseModel):
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)

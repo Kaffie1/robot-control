@@ -144,11 +144,11 @@ class RobotClient:
                     self.home_dir = self.sftp.normalize(".")
             return self.sftp
 
-    def exec_command(self, command: str) -> dict[str, Any]:
+    def exec_command(self, command: str, *, timeout: float | None = None) -> dict[str, Any]:
         with self.lock:
             self.ensure_connected()
             assert self.ssh is not None
-            _, stdout, stderr = self.ssh.exec_command(command)
+            _, stdout, stderr = self.ssh.exec_command(command, timeout=timeout)
             exit_code = stdout.channel.recv_exit_status()
             return {
                 "exit_code": exit_code,
@@ -156,12 +156,12 @@ class RobotClient:
                 "stderr": stderr.read().decode("utf-8", errors="replace"),
             }
 
-    def exec_sudo_command(self, command: str, password: str) -> dict[str, Any]:
+    def exec_sudo_command(self, command: str, password: str, *, timeout: float | None = None) -> dict[str, Any]:
         with self.lock:
             self.ensure_connected()
             assert self.ssh is not None
             wrapped = f"sudo -S -p '' bash -lc {shlex.quote(command)}"
-            stdin, stdout, stderr = self.ssh.exec_command(wrapped)
+            stdin, stdout, stderr = self.ssh.exec_command(wrapped, timeout=timeout)
             stdin.write(f"{password}\n")
             stdin.flush()
             exit_code = stdout.channel.recv_exit_status()
@@ -249,7 +249,7 @@ class RobotClient:
             f"docker compose exec -T {shlex.quote(normalized_service_name)} "
             f"bash -lc {shlex.quote(f'{setup_script}; {normalized_command}')}"
         )
-        return self.exec_command(wrapped_command)
+        return self.exec_command(wrapped_command, timeout=timeout + 5.0)
 
     def get_interactive_env(self, name: str, *, timeout: float = 10.0) -> str:
         variable_name = str(name or "").strip()
@@ -408,6 +408,24 @@ class RobotClient:
             except FileNotFoundError:
                 return False
 
+    def get_remote_file_owner(self, remote_path: str) -> str:
+        remote_path = self.resolve_remote_path(remote_path)
+        result = self.exec_command(f"stat -c '%U' -- {shlex.quote(remote_path)}")
+        if result["exit_code"] != 0:
+            raise ApiError(f"读取远端文件所有者失败: {short_error(result)}")
+        return str(result.get("stdout") or "").strip()
+
+    def ensure_remote_executable(self, remote_path: str, *, sudo_password: str = "") -> dict[str, Any]:
+        remote_path = self.resolve_remote_path(remote_path)
+        command = f"chmod +x -- {shlex.quote(remote_path)}"
+        if sudo_password:
+            result = self.exec_sudo_command(command, sudo_password)
+        else:
+            result = self.exec_command(command)
+        if result["exit_code"] != 0:
+            raise ApiError(f"设置远端文件可执行权限失败: {short_error(result)}")
+        return result
+
     def is_dir_path(self, remote_path: str) -> bool:
         with self.lock:
             self.ensure_connected()
@@ -418,12 +436,16 @@ class RobotClient:
             except FileNotFoundError:
                 return False
 
-    def backup_remote_path(self, remote_path: str) -> str | None:
+    def backup_remote_path(self, remote_path: str, *, sudo_password: str = "") -> str | None:
         remote_path = self.resolve_remote_path(remote_path)
         if not self.path_exists(remote_path):
             return None
         backup_path = build_backup_path(remote_path)
-        result = self.exec_command(f"cp -a -- {shlex.quote(remote_path)} {shlex.quote(backup_path)}")
+        command = f"cp -a -- {shlex.quote(remote_path)} {shlex.quote(backup_path)}"
+        if sudo_password:
+            result = self.exec_sudo_command(command, sudo_password)
+        else:
+            result = self.exec_command(command)
         if result["exit_code"] != 0:
             raise ApiError(f"远程备份失败: {short_error(result)}")
         return backup_path
@@ -441,9 +463,10 @@ class RobotClient:
         target_path = self.resolve_remote_path(target_path)
         self.ensure_remote_dir(posixpath.dirname(target_path))
         command = f"mv -f -- {shlex.quote(source_path)} {shlex.quote(target_path)}"
-        result = self.exec_command(command)
-        if result["exit_code"] != 0 and sudo_password and "Permission denied" in short_error(result):
+        if sudo_password:
             result = self.exec_sudo_command(command, sudo_password)
+        else:
+            result = self.exec_command(command)
         if result["exit_code"] != 0:
             raise ApiError(f"移动远端文件失败: {short_error(result)}")
         return result
@@ -454,13 +477,14 @@ class RobotClient:
             return
         command = "rm -rf --" if recursive else "rm -f --"
         raw_command = f"{command} {shlex.quote(target_path)}"
-        result = self.exec_command(raw_command)
-        if result["exit_code"] != 0 and sudo_password and "Permission denied" in short_error(result):
+        if sudo_password:
             result = self.exec_sudo_command(raw_command, sudo_password)
+        else:
+            result = self.exec_command(raw_command)
         if result["exit_code"] != 0:
             raise ApiError(f"删除远端路径失败: {short_error(result)}")
 
-    def remove_files_by_prefix(self, remote_dir: str, prefix: str) -> list[str]:
+    def remove_files_by_prefix(self, remote_dir: str, prefix: str, *, sudo_password: str = "") -> list[str]:
         target_dir = self.resolve_remote_path(remote_dir)
         if not self.path_exists(target_dir):
             return []
@@ -472,7 +496,11 @@ class RobotClient:
             entry_path = str(entry.get("path") or "")
             if not entry_name.startswith(prefix):
                 continue
-            result = self.exec_command(f"rm -f -- {shlex.quote(entry_path)}")
+            command = f"rm -f -- {shlex.quote(entry_path)}"
+            if sudo_password:
+                result = self.exec_sudo_command(command, sudo_password)
+            else:
+                result = self.exec_command(command)
             if result["exit_code"] != 0:
                 raise ApiError(f"删除旧文件失败: {short_error(result)}")
             removed_files.append(entry_path)

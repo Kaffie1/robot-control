@@ -1,0 +1,56 @@
+version: 1
+description: template for external users to report robot faults
+
+report:
+  title: ""
+  reporter: ""
+  contact: ""
+  robot:
+    robot_id: ""
+    device_type: ""
+    site: ""
+  fault:
+    category: ""
+    module_name: ""
+    severity: medium
+    symptom: ""
+    expected_behavior: ""
+    actual_behavior: ""
+    first_seen_at: ""
+    frequency: ""
+    reproducible: false
+    trigger_steps: []
+  environment:
+    software_version: ""
+    compose_profiles: ""
+    recent_deploy:
+      task_id: ""
+      summary: ""
+    network_changes: ""
+    hardware_changes: ""
+  evidence:
+    related_topics: []
+    related_services: []
+    screenshots: []
+    logs: []
+    extra_notes: ""
+  recovery_policy:
+    allow_auto_diagnosis: true
+    allow_auto_recovery: false
+    require_manual_confirmation_for_write_actions: true
+
+field_guide:
+  severity:
+    allowed_values:
+      - low
+      - medium
+      - high
+      - critical
+  category_examples:
+    - 无法连接机器人
+    - 模块未启动
+    - Topic 无数据
+    - Service 调用失败
+    - 部署后异常
+    - 地图或定位异常
+    - 底盘运动异常

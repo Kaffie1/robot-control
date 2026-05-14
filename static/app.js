@@ -31,14 +31,6 @@ const pageNavButtons = Array.from(document.querySelectorAll("[data-page-target]"
 const pagePanels = Array.from(document.querySelectorAll("[data-page-panel]"));
 const guideNavButtons = Array.from(document.querySelectorAll("[data-guide-target]"));
 const guidePanels = Array.from(document.querySelectorAll("[data-guide-panel]"));
-const configNavButtons = Array.from(document.querySelectorAll("[data-config-target]"));
-const configPanels = Array.from(document.querySelectorAll("[data-config-panel]"));
-const refreshAudioConfigBtn = document.getElementById("refreshAudioConfigBtn");
-const enableAllAudioConfigBtn = document.getElementById("enableAllAudioConfigBtn");
-const disableAllAudioConfigBtn = document.getElementById("disableAllAudioConfigBtn");
-const saveAudioConfigBtn = document.getElementById("saveAudioConfigBtn");
-const audioConfigStatus = document.getElementById("audioConfigStatus");
-const audioConfigToggleList = document.getElementById("audioConfigToggleList");
 const rosNavButtons = Array.from(document.querySelectorAll("[data-ros-target]"));
 const rosPanels = Array.from(document.querySelectorAll("[data-ros-panel]"));
 const feishuDocsList = document.getElementById("feishuDocsList");
@@ -93,6 +85,11 @@ const timeSelectContainers = Array.from(document.querySelectorAll(".log-time-sel
 const moduleFilterRoots = Array.from(document.querySelectorAll("[data-module-filter]"));
 const remoteDirSelects = Array.from(document.querySelectorAll("[data-remote-dir-select]"));
 const remoteDirLoadButtons = Array.from(document.querySelectorAll("[data-load-remote-dir]"));
+const chatForm = document.getElementById("chatForm");
+const chatInput = document.getElementById("chatInput");
+const chatSubmitBtn = document.getElementById("chatSubmitBtn");
+const chatClearBtn = document.getElementById("chatClearBtn");
+const chatMessageList = document.getElementById("chatMessageList");
 const DEFAULT_PROJECT_ROOT = "/naviai/home/navi_project";
 const PACKAGE_DEPLOY_DIR = "/tmp";
 const DEFAULT_CONNECTION_FORM = {
@@ -144,6 +141,7 @@ const packageDeployStageState = {
   deviceType: "ORIN",
   machineOptions: [],
 };
+let packageDeployRequestInFlight = false;
 let packageAutoDeployConfigs = [];
 let moduleAutoDeployConfigs = [];
 let manualPackageServerFilePath = "";
@@ -173,11 +171,91 @@ const rosFilterConfig = {
   topicNames: [],
   serviceNames: [],
 };
-const audioMonitorState = {
-  entries: [],
-  hasLoaded: false,
-  isSaving: false,
+const chatState = {
+  messages: [],
+  pending: false,
 };
+
+function renderChatMessages() {
+  if (!chatMessageList) {
+    return;
+  }
+  chatMessageList.replaceChildren();
+  if (!chatState.messages.length) {
+    const empty = document.createElement("div");
+    empty.className = "chat-empty-state";
+    empty.innerHTML = "<strong>开始对话</strong><p>你可以先描述一个故障现象，或者直接问机器人相关问题。</p>";
+    chatMessageList.appendChild(empty);
+    return;
+  }
+  chatState.messages.forEach((message) => {
+    const item = document.createElement("article");
+    item.className = `chat-message-item chat-message-item-${message.role}`;
+    const badge = document.createElement("div");
+    badge.className = "chat-message-role";
+    badge.textContent = message.role === "assistant" ? "助手" : "你";
+    const body = document.createElement("div");
+    body.className = "chat-message-body";
+    body.textContent = message.content || "";
+    item.append(badge, body);
+    chatMessageList.appendChild(item);
+  });
+  chatMessageList.scrollTop = chatMessageList.scrollHeight;
+}
+
+function setChatPending(pending) {
+  chatState.pending = Boolean(pending);
+  if (chatSubmitBtn) {
+    chatSubmitBtn.disabled = chatState.pending;
+    chatSubmitBtn.textContent = chatState.pending ? "发送中..." : "发送";
+  }
+  if (chatInput) {
+    chatInput.disabled = chatState.pending;
+  }
+}
+
+async function submitChatMessage(event) {
+  event.preventDefault();
+  const content = String(chatInput?.value || "").trim();
+  if (!content) {
+    throw new Error("请输入聊天内容");
+  }
+  const history = chatState.messages.map((item) => ({
+    role: item.role,
+    content: item.content,
+  }));
+  chatState.messages.push({ role: "user", content });
+  renderChatMessages();
+  if (chatInput) {
+    chatInput.value = "";
+  }
+  setChatPending(true);
+  try {
+    const data = await request("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: content,
+        history,
+      }),
+    });
+    chatState.messages.push({
+      role: "assistant",
+      content: String(data.message || "").trim(),
+    });
+    renderChatMessages();
+    appendLog("聊天助手回复完成", data.model || "");
+  } catch (error) {
+    chatState.messages.push({
+      role: "assistant",
+      content: `调用失败：${error.message}`,
+    });
+    renderChatMessages();
+    throw error;
+  } finally {
+    setChatPending(false);
+  }
+}
 
 function switchPage(pageName = "remote") {
   const requestedPage = String(pageName || "remote").trim() || "remote";
@@ -198,9 +276,6 @@ function switchPage(pageName = "remote") {
   if (normalizedPage === "ros") {
     ensureRosPageLoaded();
   }
-  if (normalizedPage === "config") {
-    ensureAudioMonitorConfigLoaded();
-  }
 }
 
 function switchGuidePage(pageName = "flow") {
@@ -216,166 +291,6 @@ function switchGuidePage(pageName = "flow") {
     panel.classList.toggle("is-active", isActive);
     panel.hidden = !isActive;
   });
-}
-
-function switchConfigPage(pageName = "voice") {
-  const requestedPage = String(pageName || "voice").trim() || "voice";
-  const normalizedPage = configPanels.some((panel) => panel.dataset.configPanel === requestedPage) ? requestedPage : "voice";
-  configNavButtons.forEach((button) => {
-    const isActive = button.dataset.configTarget === normalizedPage;
-    button.classList.toggle("is-active", isActive);
-    button.setAttribute("aria-selected", isActive ? "true" : "false");
-  });
-  configPanels.forEach((panel) => {
-    const isActive = panel.dataset.configPanel === normalizedPage;
-    panel.classList.toggle("is-active", isActive);
-    panel.hidden = !isActive;
-  });
-  if (normalizedPage === "voice") {
-    ensureAudioMonitorConfigLoaded();
-  }
-}
-
-function setAudioConfigStatus(message, isError = false) {
-  if (!audioConfigStatus) {
-    return;
-  }
-  audioConfigStatus.textContent = message;
-  audioConfigStatus.classList.toggle("is-error", Boolean(isError));
-}
-
-function setAllAudioMonitorEntries(enabled) {
-  if (!audioMonitorState.entries.length) {
-    setAudioConfigStatus("当前没有可批量设置的语音监控模块。", true);
-    return;
-  }
-  audioMonitorState.entries.forEach((entry) => {
-    entry.enable = Boolean(enabled);
-  });
-  renderAudioMonitorConfig();
-  setAudioConfigStatus(enabled ? "已将当前页面中的全部模块设置为开启。记得点击“保存并重载”。" : "已将当前页面中的全部模块设置为关闭。记得点击“保存并重载”。");
-}
-
-function renderAudioMonitorConfig() {
-  if (!audioConfigToggleList) {
-    return;
-  }
-  audioConfigToggleList.replaceChildren();
-  if (!audioMonitorState.entries.length) {
-    const placeholder = document.createElement("div");
-    placeholder.className = "config-placeholder";
-    placeholder.innerHTML = "<strong>当前状态</strong><p>未读取到任何语音监控模块。</p>";
-    audioConfigToggleList.appendChild(placeholder);
-    return;
-  }
-  audioMonitorState.entries.forEach((entry) => {
-    const item = document.createElement("label");
-    item.className = "config-toggle-item";
-
-    const info = document.createElement("div");
-    info.className = "config-toggle-copy";
-
-    const title = document.createElement("strong");
-    title.textContent = entry.module || "-";
-
-    const meta = document.createElement("div");
-    meta.className = "config-toggle-meta";
-    meta.textContent = entry.topic || "未配置 topic";
-
-    info.append(title, meta);
-
-    const toggle = document.createElement("input");
-    toggle.type = "checkbox";
-    toggle.checked = Boolean(entry.enable);
-    toggle.disabled = Boolean(audioMonitorState.isSaving);
-    toggle.addEventListener("change", () => {
-      entry.enable = toggle.checked;
-    });
-
-    const switchShell = document.createElement("span");
-    switchShell.className = "config-switch";
-    switchShell.appendChild(toggle);
-
-    const switchTrack = document.createElement("span");
-    switchTrack.className = "config-switch-track";
-    switchShell.appendChild(switchTrack);
-
-    item.append(info, switchShell);
-    audioConfigToggleList.appendChild(item);
-  });
-}
-
-async function loadAudioMonitorConfig() {
-  setAudioConfigStatus("正在从远端读取语音监控配置...");
-  const data = await request("/api/config/audio-monitor");
-  audioMonitorState.entries = Array.isArray(data.entries)
-    ? data.entries.map((entry) => ({
-      module: String(entry?.module || "").trim(),
-      enable: Boolean(entry?.enable),
-      audio_error_path: String(entry?.audio_error_path || "").trim(),
-      audio_normal_path: String(entry?.audio_normal_path || "").trim(),
-      topic: String(entry?.topic || "").trim(),
-    }))
-    : [];
-  audioMonitorState.hasLoaded = true;
-  renderAudioMonitorConfig();
-  setAudioConfigStatus(`已加载 ${audioMonitorState.entries.length} 个语音监控模块。`);
-}
-
-async function ensureAudioMonitorConfigLoaded() {
-  if (audioMonitorState.hasLoaded) {
-    return;
-  }
-  try {
-    await loadAudioMonitorConfig();
-  } catch (error) {
-    setAudioConfigStatus(`加载语音监控配置失败：${error.message}`, true);
-    appendLog("加载语音监控配置失败", error.message);
-  }
-}
-
-async function saveAudioMonitorConfig() {
-  if (!audioMonitorState.entries.length) {
-    throw new Error("当前没有可保存的语音监控配置");
-  }
-  audioMonitorState.isSaving = true;
-  renderAudioMonitorConfig();
-  setAudioConfigStatus("正在保存远端语音监控配置并执行重载...");
-  try {
-    const data = await request("/api/config/audio-monitor", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        entries: audioMonitorState.entries.map((entry) => ({
-          module: entry.module,
-          enable: Boolean(entry.enable),
-        })),
-      }),
-    });
-    audioMonitorState.entries = Array.isArray(data.entries)
-      ? data.entries.map((entry) => ({
-        module: String(entry?.module || "").trim(),
-        enable: Boolean(entry?.enable),
-        audio_error_path: String(entry?.audio_error_path || "").trim(),
-        audio_normal_path: String(entry?.audio_normal_path || "").trim(),
-        topic: String(entry?.topic || "").trim(),
-      }))
-      : audioMonitorState.entries;
-    renderAudioMonitorConfig();
-    setAudioConfigStatus(data.reload_output ? `保存成功，重载结果：${data.reload_output}` : "保存成功，配置已重载。");
-    appendLog("语音监控配置已保存", data.reload_output || String(data.remote_path || ""));
-  } catch (error) {
-    audioMonitorState.hasLoaded = false;
-    try {
-      await loadAudioMonitorConfig();
-    } catch (reloadError) {
-      appendLog("保存失败后刷新语音监控配置失败", reloadError.message);
-    }
-    throw error;
-  } finally {
-    audioMonitorState.isSaving = false;
-    renderAudioMonitorConfig();
-  }
 }
 
 function switchRosSection(pageName = "topic") {
@@ -810,6 +725,26 @@ function activatePackageDeployContinueStage({ fileName = "", remotePath = "", re
       }
     }
   }, 0);
+}
+
+function markPackageDeployFailed(message = "") {
+  packageDeployStageState.stage = "failed";
+  packageDeployStageState.fileName = "";
+  packageDeployStageState.remotePath = "";
+  packageDeployStageState.remoteDir = "";
+  packageDeployStageState.machineOptions = [];
+  pendingPackageAutoDeployUrls = [];
+  renderPackageMachineOptions([]);
+  setPackageMachineAttention(true);
+  if (packageDeploySubmitBtn) {
+    packageDeploySubmitBtn.textContent = "重新部署";
+    packageDeploySubmitBtn.disabled = false;
+  }
+  if (message) {
+    setPackageDeployHint(`${message}，可直接重新部署`, true);
+  } else {
+    setPackageDeployHint("部署失败，可直接重新部署，或查看后台日志后再试。", true);
+  }
 }
 
 function buildTimeSelect(prefix, suffix, start, end, pad = true) {
@@ -2130,6 +2065,9 @@ function findCurrentDeployTask(tasks = [], deployMode) {
       return currentTask;
     }
   }
+  if (deployMode === "package" && packageDeployRequestInFlight) {
+    return null;
+  }
   const latestTask = tasks.find((task) => isDeployTask(task, deployMode));
   if (latestTask) {
     currentDeployTaskIds[deployMode] = latestTask.id;
@@ -2248,6 +2186,10 @@ function syncDeployFlow(deployMode, { tasks = null, task = null, progress } = {}
   }
   if (resolvedTask && isDeployTask(resolvedTask, deployMode)) {
     currentDeployTaskIds[deployMode] = resolvedTask.id;
+  }
+
+  if (deployMode === "package" && resolvedTask && String(resolvedTask.status || "").trim().toLowerCase() === "failed") {
+    markPackageDeployFailed(String(resolvedTask.error || "部署失败，请查看后台日志"));
   }
 
   renderDeployFlow(deployFlowViews[deployMode], deriveDeployFlow(resolvedTask, deployProgressSnapshots[deployMode], deployMode));
@@ -3415,45 +3357,21 @@ guideNavButtons.forEach((button) => {
   });
 });
 
-configNavButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    switchConfigPage(button.dataset.configTarget || "voice");
-  });
-});
-
-if (refreshAudioConfigBtn) {
-  refreshAudioConfigBtn.addEventListener("click", async () => {
+if (chatForm) {
+  chatForm.addEventListener("submit", async (event) => {
     try {
-      audioMonitorState.hasLoaded = false;
-      await loadAudioMonitorConfig();
+      await submitChatMessage(event);
     } catch (error) {
-      setAudioConfigStatus(`刷新语音监控配置失败：${error.message}`, true);
-      appendLog("刷新语音监控配置失败", error.message);
-    }
-  });
-}
-
-if (enableAllAudioConfigBtn) {
-  enableAllAudioConfigBtn.addEventListener("click", () => {
-    setAllAudioMonitorEntries(true);
-  });
-}
-
-if (disableAllAudioConfigBtn) {
-  disableAllAudioConfigBtn.addEventListener("click", () => {
-    setAllAudioMonitorEntries(false);
-  });
-}
-
-if (saveAudioConfigBtn) {
-  saveAudioConfigBtn.addEventListener("click", async () => {
-    try {
-      await saveAudioMonitorConfig();
-    } catch (error) {
-      setAudioConfigStatus(`保存语音监控配置失败：${error.message}`, true);
-      appendLog("保存语音监控配置失败", error.message);
+      appendLog("聊天发送失败", error.message);
       alert(error.message);
     }
+  });
+}
+
+if (chatClearBtn) {
+  chatClearBtn.addEventListener("click", () => {
+    chatState.messages = [];
+    renderChatMessages();
   });
 }
 
@@ -3643,9 +3561,11 @@ async function submitDeployForm(event, { deployMode, progressView, tokenPrefix }
   } catch (error) {
     const retryResolution = await resolveDeployConflictFromError(formData, progressView, error);
     if (!retryResolution.handled) {
+      markPackageDeployFailed(error.message || "上传或识别机型失败");
       throw error;
     }
     if (retryResolution.cancelled) {
+      markPackageDeployFailed(error.message || "上传或识别机型失败");
       return;
     }
     data = await submitUploadWithProgress("/api/deploy", formData, progressView, tokenPrefix, {
@@ -3685,6 +3605,7 @@ async function createPackageDeployTask(formData, { progressView, tokenPrefix = "
     progress: skipBrowserUpload ? { phase: "completed", done: true } : { phase: "preparing", done: false },
   });
   let data;
+  packageDeployRequestInFlight = true;
   try {
     data = await submitUploadWithProgress("/api/deploy", formData, progressView, tokenPrefix, {
       skipBrowserUpload,
@@ -3700,6 +3621,8 @@ async function createPackageDeployTask(formData, { progressView, tokenPrefix = "
     data = await submitUploadWithProgress("/api/deploy", formData, progressView, tokenPrefix, {
       skipBrowserUpload: retryResolution.skipBrowserUpload,
     });
+  } finally {
+    packageDeployRequestInFlight = false;
   }
   selectedTaskId = data.task.id;
   currentDeployTaskIds.package = data.task.id;
@@ -3755,6 +3678,7 @@ async function submitPackageUploadProbe(event) {
     return;
   }
   let data;
+  packageDeployRequestInFlight = true;
   try {
     data = await submitUploadWithProgress("/api/package-upload-probe", formData, uploadProgressViews.packageDeploy, "package-probe", {
       skipBrowserUpload: conflictResolution.skipBrowserUpload,
@@ -3762,14 +3686,18 @@ async function submitPackageUploadProbe(event) {
   } catch (error) {
     const retryResolution = await resolveDeployConflictFromError(formData, uploadProgressViews.packageDeploy, error);
     if (!retryResolution.handled) {
+      markPackageDeployFailed(error.message || "上传并识别机型失败");
       throw error;
     }
     if (retryResolution.cancelled) {
+      markPackageDeployFailed(error.message || "上传并识别机型失败");
       return;
     }
     data = await submitUploadWithProgress("/api/package-upload-probe", formData, uploadProgressViews.packageDeploy, "package-probe", {
       skipBrowserUpload: retryResolution.skipBrowserUpload,
     });
+  } finally {
+    packageDeployRequestInFlight = false;
   }
   const machineOptions = Array.isArray(data.machine_options) && data.machine_options.length
     ? data.machine_options
@@ -3841,6 +3769,7 @@ async function submitPackageContinueDeployForm(formNode) {
   const firstResult = await waitForTaskCompletion(firstTask.id);
   finalizeUploadProgressFromTask(uploadProgressViews.packageDeploy, firstResult);
   if (String(firstResult.status || "").trim().toLowerCase() === "failed") {
+    markPackageDeployFailed(firstResult.error || "首个整包部署任务执行失败");
     throw new Error(firstResult.error || "首个整包部署任务执行失败");
   }
 
@@ -3862,6 +3791,7 @@ async function submitPackageContinueDeployForm(formNode) {
     const nextResult = await waitForTaskCompletion(nextTask.id);
     finalizeUploadProgressFromTask(uploadProgressViews.packageDeploy, nextResult);
     if (String(nextResult.status || "").trim().toLowerCase() === "failed") {
+      markPackageDeployFailed(nextResult.error || `第 ${index + 1} 个整包部署任务执行失败`);
       throw new Error(nextResult.error || `第 ${index + 1} 个整包部署任务执行失败`);
     }
   }
@@ -3884,8 +3814,13 @@ packageDeployForm.addEventListener("submit", async (event) => {
     }
     await submitPackageUploadProbe(event);
   } catch (error) {
-    appendLog(packageDeployStageState.stage === "continue" ? "继续整包部署失败" : "上传并识别机型失败", error.message);
-    setPackageDeployHint(error.message, true);
+    const isContinueStage = packageDeployStageState.stage === "continue";
+    appendLog(isContinueStage ? "继续整包安装失败" : "上传并识别机型失败", error.message);
+    if (isContinueStage) {
+      markPackageDeployFailed(error.message || "安装失败，请查看后台日志");
+    } else {
+      setPackageDeployHint(error.message, true);
+    }
     alert(error.message);
   }
 });
@@ -3955,9 +3890,9 @@ remoteDirLoadButtons.forEach((button) => {
 window.addEventListener("load", async () => {
   try {
     const initialPage = String(window.location.hash || "").replace(/^#/, "").trim() || "remote";
+    renderChatMessages();
     switchPage(initialPage);
     switchGuidePage("flow");
-    switchConfigPage("voice");
     switchRosSection("topic");
     switchRosTab("publish");
     updateRosTopicSummary();

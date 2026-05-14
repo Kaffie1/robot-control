@@ -2,6 +2,7 @@ import os
 import posixpath
 import shlex
 import tempfile
+import re
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,41 @@ def current_robot_password(session: dict[str, Any]) -> str:
     if isinstance(ssh_auth, dict):
         return str(ssh_auth.get("password") or "")
     return ""
+
+
+def render_package_install_command(
+    template: str,
+    remote_path: str,
+    *,
+    machine_type: str,
+    device_type: str,
+    target_username: str,
+    target_password: str,
+    include_target_credentials: bool,
+) -> str:
+    normalized_template = str(template or "")
+    if not include_target_credentials:
+        normalized_template = re.sub(r"\s+--user=\{target_username\}", "", normalized_template)
+        normalized_template = re.sub(r"\s+--password=\{target_password\}", "", normalized_template)
+        normalized_template = re.sub(r"\s{2,}", " ", normalized_template).strip()
+    template_vars: dict[str, Any] = {
+        "machine_type": machine_type,
+        "device_type": device_type,
+    }
+    if include_target_credentials and "--user" in normalized_template:
+        template_vars["target_username"] = target_username
+        template_vars["target_password"] = target_password
+    return render_remote_command(normalized_template, remote_path, template_vars)
+
+
+def probe_remote_package_supports_credentials(client: RobotClient, remote_path: str) -> bool:
+    command = f"grep -a -Eq -- '--user|--password' -- {shlex.quote(remote_path)}"
+    result = client.exec_command(command)
+    if result["exit_code"] == 0:
+        return True
+    if result["exit_code"] == 1:
+        return False
+    raise ApiError(f"检测安装包参数支持情况失败: {result.get('stderr') or result.get('stdout') or '未知错误'}")
 
 
 def ensure_connected_to_history_target(session: dict[str, Any], entry: dict[str, Any]):
@@ -155,6 +191,7 @@ def create_deploy_runner(
     file_bytes: bytes,
     source_metadata: dict[str, Any] | None = None,
     skip_upload: bool = False,
+    cleanup_existing_remote_files: bool = True,
     upload_token: str = "",
     owner_id: str = "",
 ):
@@ -189,6 +226,7 @@ def create_deploy_runner(
             "target_port": int(target.get("port") or 22),
             "target_username": str(target.get("username") or ""),
             "upload_skipped": skip_upload,
+            "cleanup_existing_remote_files": cleanup_existing_remote_files,
             "source_metadata": source_metadata or {},
             "warnings": warnings,
         }
@@ -205,6 +243,7 @@ def create_deploy_runner(
             "machine_type": machine_type,
             "device_type": str(target.get("device_type") or device_type),
             "upload_skipped": skip_upload,
+            "cleanup_existing_remote_files": cleanup_existing_remote_files,
         }
         ctx.log(f"目标机器人: {identity['robot_username']}@{identity['robot_host']}:{identity['robot_port']}")
         if machine_type:
@@ -224,17 +263,28 @@ def create_deploy_runner(
                     ctx.log(f"检测到远端同名安装包，跳过上传并直接复用: {remote_path}")
                     if not client.path_exists(remote_path):
                         raise ApiError(f"远端安装包不存在，无法直接安装: {remote_path}")
+                    sudo_password = str(target.get("password") or "")
+                    try:
+                        ctx.log(f"检查远端文件可执行权限: {remote_path}")
+                        chmod_result = client.ensure_remote_executable(remote_path, sudo_password=sudo_password)
+                        summary["chmod_result"] = chmod_result
+                        log_command_result(ctx, "设置远端文件可执行权限", chmod_result)
+                    except Exception as exc:  # noqa: BLE001
+                        raise TaskFailure(f"远端安装包权限修复失败: {exc}", {"summary": summary, "history": history}) from exc
                     upload_progress_manager.update(upload_token, transferred_bytes=0, total_bytes=0, phase="completed", message=f"已复用远端安装包: {remote_path}", done=True)
                 else:
                     if source_metadata and source_metadata.get("source_kind") == "file_server":
                         ctx.log(f"文件服务器路径: {source_metadata.get('source_path')}")
                         ctx.log(f"裁剪后的下载路径: {source_metadata.get('download_path')}")
                         ctx.log(f"已下载到本机临时目录: {source_metadata.get('local_tmp_path')}")
-                    ctx.log(f"清理目标目录同前缀旧包: {package_prefix}")
-                    removed_files = client.remove_files_by_prefix(remote_dir, package_prefix)
-                    summary["removed_files"] = removed_files
-                    for removed_file in removed_files:
-                        ctx.log(f"已删除旧包: {removed_file}")
+                    if cleanup_existing_remote_files:
+                        ctx.log(f"清理目标目录同前缀旧包: {package_prefix}")
+                        removed_files = client.remove_files_by_prefix(remote_dir, package_prefix, sudo_password=sudo_password)
+                        summary["removed_files"] = removed_files
+                        for removed_file in removed_files:
+                            ctx.log(f"已删除旧包: {removed_file}")
+                    else:
+                        ctx.log("跳过同前缀旧包清理，直接上传新的安装包")
                     ctx.log(f"上传安装包到 {remote_path}")
                     upload_progress_manager.update(
                         upload_token,
@@ -252,15 +302,22 @@ def create_deploy_runner(
                 upload_progress_manager.fail(upload_token, f"上传失败: {exc}")
                 raise
 
-            install_command = render_remote_command(
+            supports_target_credentials = probe_remote_package_supports_credentials(client, remote_path)
+            summary["supports_target_credentials"] = supports_target_credentials
+            history["supports_target_credentials"] = supports_target_credentials
+            if supports_target_credentials:
+                ctx.log("安装包支持 --user / --password 参数")
+            else:
+                ctx.log("安装包不支持 --user / --password 参数，已自动忽略相关配置")
+
+            install_command = render_package_install_command(
                 install_template,
                 remote_path,
-                {
-                    "machine_type": machine_type,
-                    "device_type": str(target.get("device_type") or device_type),
-                    "target_username": str(target.get("username") or ""),
-                    "target_password": str(target.get("password") or ""),
-                },
+                machine_type=machine_type,
+                device_type=str(target.get("device_type") or device_type),
+                target_username=str(target.get("username") or ""),
+                target_password=str(target.get("password") or ""),
+                include_target_credentials=supports_target_credentials,
             )
             summary["install_command"] = install_command
             history["install_command"] = install_command
@@ -628,7 +685,7 @@ def create_module_deploy_runner(
                             phase="preparing",
                             message=f"[{package_index}/{len(package_files)}] 正在清理旧包: {entry.get('name')}",
                         )
-                removed_files = client.remove_files_by_prefix(module_path, package_prefix)
+                removed_files = client.remove_files_by_prefix(module_path, package_prefix, sudo_password=sudo_password)
                 package_summary["removed_files"] = removed_files
                 summary["removed_files"].extend(removed_files)
                 for removed_file in removed_files:
@@ -653,7 +710,7 @@ def create_module_deploy_runner(
 
                 client.upload_bytes(package_file_bytes, temp_remote_path, progress_callback=progress_callback)
                 ctx.log(f"[{package_index}/{len(package_files)}] 移动模块安装包到目标目录: {temp_remote_path} -> {remote_package_path}")
-                move_result = client.move_remote_path(temp_remote_path, remote_package_path)
+                move_result = client.move_remote_path(temp_remote_path, remote_package_path, sudo_password=sudo_password)
                 log_command_result(ctx, f"移动安装包命令 [{package_file_name}]", move_result)
                 transferred_total += len(package_file_bytes)
             upload_progress_manager.update(

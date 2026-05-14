@@ -1,19 +1,61 @@
+import os
 from pathlib import Path
 
 
+def load_env_file(env_path: str | Path) -> None:
+    path = Path(env_path)
+    if not path.exists() or not path.is_file():
+        return
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        normalized_key = key.strip()
+        if not normalized_key:
+            continue
+        normalized_value = value.strip()
+        if len(normalized_value) >= 2 and normalized_value[0] == normalized_value[-1] and normalized_value[0] in {"'", '"'}:
+            normalized_value = normalized_value[1:-1]
+        os.environ.setdefault(normalized_key, normalized_value)
+
+
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_env_file(BASE_DIR / ".env")
+
+APP_HOST = str(os.getenv("APP_HOST") or "0.0.0.0").strip() or "127.0.0.1"
+APP_PORT = int(str(os.getenv("APP_PORT") or "8000").strip() or "8000")
+OPENAI_API_KEY = str(os.getenv("OPENAI_API_KEY") or "").strip()
+OPENAI_BASE_URL = str(os.getenv("OPENAI_BASE_URL") or "").strip()
+OPENAI_CHAT_MODEL = str(os.getenv("OPENAI_CHAT_MODEL") or "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+OPENAI_CHAT_TEMPERATURE = float(str(os.getenv("OPENAI_CHAT_TEMPERATURE") or "0.2").strip() or "0.2")
+OPENAI_ENABLE_REASONING_SPLIT = str(os.getenv("OPENAI_ENABLE_REASONING_SPLIT") or "").strip().lower() in {"1", "true", "yes", "on"}
+OPENAI_THINK = str(os.getenv("OPENAI_THINK") or "").strip()
+
 STATIC_DIR = BASE_DIR / "static"
 TEMPLATE_DIR = BASE_DIR / "templates"
+FAULT_CONFIG_DIR = BASE_DIR / "config"
 LOCAL_MODULE_DIR = BASE_DIR / "module"
 DATA_DIR = BASE_DIR / "data"
+RUNTIME_DIR = BASE_DIR / ".runtime"
 DB_PATH = DATA_DIR / "operations.db"
 CONNECTION_CACHE_PATH = DATA_DIR / "connection_cache.json"
-DEPLOY_CONFIG_PATH = STATIC_DIR / "deploy_config.json"
+DEPLOY_CONFIG_PATH = STATIC_DIR / "page_configs" / "deploy.json"
+FAULT_PLAYBOOKS_PATH = FAULT_CONFIG_DIR / "fault_playbooks.yaml"
+FAULT_PROMPT_TEMPLATE_PATH = FAULT_CONFIG_DIR / "fault_prompt_template.yaml"
+FAULT_REPORT_TEMPLATE_PATH = FAULT_CONFIG_DIR / "fault_report_template.yaml"
+FAULT_TOOLS_PATH = FAULT_CONFIG_DIR / "fault_tools.yaml"
+FAULT_TRACE_LOG_PATH = RUNTIME_DIR / "fault_diagnosis.log"
 SESSION_COOKIE = "robot_upgrade_sid"
 MAX_CONNECTION_CACHE_ITEMS = 8
 MAX_TASK_ITEMS = 5
 SESSION_IDLE_TIMEOUT_SECONDS = 30 * 60
 SESSION_CLEANUP_INTERVAL_SECONDS = 60
+
 PACKAGE_DEPLOY_DIR = "/tmp"
 MODULE_DEPLOY_ROOT = "/home/naviai/navi_project/.dists"
 MODULE_DEPLOY_PROJECT_ROOT = "/home/naviai/navi_project"

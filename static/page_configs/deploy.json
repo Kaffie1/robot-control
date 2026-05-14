@@ -1,24 +1,60 @@
 {
   "package": {
     "probe_command_template": "chmod +x {deb_path} && {deb_path} --quiet -- support_robot_types",
-    "install_template": "chmod +x {deb_path} && {deb_path} -- --device_type={device_type} --force --robot_type={machine_type} --user={target_username} --password={target_password}",
+    "install_template": "chmod +x {deb_path} && {deb_path} -- --force --robot_type={machine_type} --user={target_username} --password={target_password}",
     "start_command": "",
     "health_command": "test -s ~/.zj_humanoid/version.json && ((command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet zj_humanoid) || (command -v sudo >/dev/null 2>&1 && sudo -n systemctl is-active --quiet zj_humanoid) || test -L ~/navi_project || test -L ~/zj_humanoid || (command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -q .))",
     "rollback_template": "",
     "auto_rollback": false,
     "machine_options": [
-      { "value": "H1", "label": "H1" },
-      { "value": "U1", "label": "U1" },
-      { "value": "U2_WA1", "label": "U2_WA1" },
-      { "value": "I2", "label": "I2" },
-      { "value": "WA1", "label": "WA1" },
-      { "value": "WA2", "label": "WA2" },
-      { "value": "WA2_LS", "label": "WA2_LS" },
-      { "value": "WA2_TY20", "label": "WA2_TY20" },
-      { "value": "WA2_L", "label": "WA2_L" },
-      { "value": "WA1_400K", "label": "WA1_400K" },
-      { "value": "WA1_400L", "label": "WA1_400L" },
-      { "value": "U1_WA1", "label": "U1_WA1" }
+      {
+        "value": "H1",
+        "label": "H1"
+      },
+      {
+        "value": "U1",
+        "label": "U1"
+      },
+      {
+        "value": "U2_WA1",
+        "label": "U2_WA1"
+      },
+      {
+        "value": "I2",
+        "label": "I2"
+      },
+      {
+        "value": "WA1",
+        "label": "WA1"
+      },
+      {
+        "value": "WA1_400L",
+        "label": "WA1_400L"
+      },
+      {
+        "value": "WA1_400K",
+        "label": "WA1_400K"
+      },
+      {
+        "value": "WA2",
+        "label": "WA2"
+      },
+      {
+        "value": "WA2_LS",
+        "label": "WA2_LS"
+      },
+      {
+        "value": "WA2_TY20",
+        "label": "WA2_TY20"
+      },
+      {
+        "value": "WA2_L",
+        "label": "WA2_L"
+      },
+      {
+        "value": "U1_WA1",
+        "label": "U1_WA1"
+      }
     ]
   },
   "module": {
@@ -29,12 +65,30 @@
     "rollback_template": "",
     "auto_rollback": false,
     "machine_options": [
-      { "value": "chassis", "label": "chassis" },
-      { "value": "perception", "label": "perception" },
-      { "value": "sensor_lidar", "label": "sensor_lidar" },
-      { "value": "navigation", "label": "navigation" },
-      { "value": "map_server", "label": "map_server" },
-      { "value": "nviz", "label": "nviz" }
+      {
+        "value": "chassis",
+        "label": "chassis"
+      },
+      {
+        "value": "perception",
+        "label": "perception"
+      },
+      {
+        "value": "sensor_lidar",
+        "label": "sensor_lidar"
+      },
+      {
+        "value": "navigation",
+        "label": "navigation"
+      },
+      {
+        "value": "map_server",
+        "label": "map_server"
+      },
+      {
+        "value": "nviz",
+        "label": "nviz"
+      }
     ]
   }
 }

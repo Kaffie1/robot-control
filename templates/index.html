@@ -57,6 +57,12 @@
               </span>
               <span class="side-nav-label">ROS 接口</span>
             </button>
+            <button type="button" class="side-nav-item" data-page-target="chat" aria-selected="false">
+              <span class="side-nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6A2.5 2.5 0 0 1 16.5 15H10l-4 4v-4H7.5A2.5 2.5 0 0 1 5 12.5Z"/><path d="M8.5 8.5h7"/><path d="M8.5 11.5h4.5"/></svg>
+              </span>
+              <span class="side-nav-label">聊天助手</span>
+            </button>
             <button type="button" class="side-nav-item" data-page-target="guide" aria-selected="false">
               <span class="side-nav-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24"><path d="M6 4.5h9a3 3 0 0 1 3 3V20a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2V6.5a2 2 0 0 1 2-2Z"/><path d="M8.5 9h6"/><path d="M8.5 12.5h6"/><path d="M8.5 16h3.5"/></svg>
@@ -755,6 +761,35 @@
                   </div>
                 </section>
               </div>
+            </section>
+          </section>
+
+          <section class="page-panel" data-page-panel="chat" hidden>
+            <section class="panel chat-page-panel">
+              <div class="panel-title">
+                <span>01</span>
+                <h2>聊天助手</h2>
+              </div>
+              <div class="chat-intro-card">
+                <strong>先打通基础对话链路</strong>
+                <p>这里会把故障文档、工具列表和运行上下文一起送进模型。模型先输出命令或澄清问题，后端执行后再把结果回灌给模型继续判断。</p>
+              </div>
+              <div id="chatMessageList" class="chat-message-list">
+                <div class="chat-empty-state">
+                  <strong>开始对话</strong>
+                  <p>你可以先描述一个故障现象，或者直接问机器人相关问题。</p>
+                </div>
+              </div>
+              <form id="chatForm" class="chat-form">
+                <label class="full">
+                  <span class="subheading">输入内容</span>
+                  <textarea id="chatInput" rows="5" placeholder="例如：底盘模块启动后没有速度反馈，帮我先分析可能原因"></textarea>
+                </label>
+                <div class="button-row">
+                  <button id="chatSubmitBtn" type="submit" class="primary">发送</button>
+                  <button id="chatClearBtn" type="button" class="ghost">清空对话</button>
+                </div>
+              </form>
             </section>
           </section>
 

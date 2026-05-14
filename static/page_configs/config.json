@@ -1,6 +1,0 @@
-{
-  "audio_monitor": {
-    "remote_path": "/home/naviai/navi_project/config/robot/audio_config.yaml",
-    "reload_service_command": "rosservice call /zj_humanoid/robot/monitor_reload_config"
-  }
-}

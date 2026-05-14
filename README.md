@@ -97,7 +97,7 @@ PYTHON_BIN=/path/to/python APP_PORT=9000 ./service.sh start
 - PICO 整包部署通过当前已连接的 ORIN 跳板连接到 PICO
 - 上传后系统会识别可选机型，必须手动确认机型后才能继续部署
 
-相关配置来自 `static/deploy_config.json` 中的 `package` 段：
+相关配置来自 `static/page_configs/deploy.json` 中的 `package` 段：
 
 - `probe_command_template`：识别机型命令
 - `install_template`：安装命令模板
@@ -112,7 +112,7 @@ PYTHON_BIN=/path/to/python APP_PORT=9000 ./service.sh start
 - 适合替换单个模块的 `.deb`
 - 需要先选择模块名，再上传对应模块包或填写文件服务器路径
 - 模块包会上传到机器人模块分发目录下，再执行模块安装和容器重启
-- 当前支持的模块选项默认来自 `static/deploy_config.json` 中的 `module.machine_options`
+- 当前支持的模块选项默认来自 `static/page_configs/deploy.json` 中的 `module.machine_options`
 
 默认模块部署目录：
 
@@ -128,9 +128,56 @@ PYTHON_BIN=/path/to/python APP_PORT=9000 ./service.sh start
 - `使用说明`：页面内置的操作流程、部署方式和排障提示
 - `飞书云文档`：展示已配置的飞书文档链接
 
+## Agent 工具接口
+
+后端现在提供了一组可供 agent 直接调用的工具接口，默认复用当前浏览器会话里的机器人连接状态：
+
+- `GET /api/agent/tools`：列出所有工具及其输入 JSON Schema
+- `POST /api/agent/tool-call`：按工具名和参数执行一次工具调用
+- `POST /api/chat`：聊天模型会先输出结构化命令或澄清问题，后端执行后再把结果回灌给模型继续判断
+
+当前已接入的工具主要覆盖：
+
+- 当前连接状态查询
+- ORIN / PICO 目录浏览与文本文件读取
+- 只读远程诊断命令执行
+- ROS topic / service 列表、类型、定义、样本消息查询
+
+## 故障排查对话
+
+聊天助手页已经切换为故障排查闭环：
+
+1. 每次提问时，后端会把故障文档模板、故障提示词、故障 playbook 和可执行工具列表一起放进系统上下文
+2. 模型先输出结构化命令或澄清问题，而不是直接“猜答案”
+3. 后端按模型输出逐条执行工具调用，再把执行结果回灌给模型继续判断
+4. 模型确认结论后，再输出最终判断和建议
+
+相关文档位于 `config/`：
+
+- `config/fault_prompt_template.yaml`
+- `config/fault_playbooks.yaml`
+- `config/fault_tools.yaml`
+
+人类可读版说明见 `docs/fault_diagnosis.md`。外部人员只需要描述现象，不必填写完整故障报告。
+
+如果你要扩展故障排查能力，优先改这些文档，再补充 `backend/agent_tools.py` 里的实际工具实现。
+
+故障排查轨迹会单独写入 `.runtime/fault_diagnosis.log`，里面记录的是现象、模型输出的结构化命令、工具调用和结果，不包含隐藏思考过程。
+
+`/api/agent/tool-call` 请求示例：
+
+```json
+{
+  "name": "ros_get_topic_info",
+  "arguments": {
+    "name": "/cmd_vel"
+  }
+}
+```
+
 ## 配置文件
 
-### `static/deploy_config.json`
+### `static/page_configs/deploy.json`
 
 用于定义部署命令模板和下拉选项，至少包含以下两段：
 
@@ -185,7 +232,7 @@ PYTHON_BIN=/path/to/python APP_PORT=9000 ./service.sh start
 - `static/`：前端脚本、样式和静态配置
 - `data/`：运行时生成的数据文件
 - `.runtime/`：后台运行日志和 PID 文件
-- `static/deploy_config.json`：部署命令和下拉项配置
+- `static/page_configs/deploy.json`：部署命令和下拉项配置
 - `service.sh`：后台服务管理脚本
 
 ## 注意事项
@@ -194,7 +241,7 @@ PYTHON_BIN=/path/to/python APP_PORT=9000 ./service.sh start
 - SSH 主机密钥使用自动信任策略，更适合内网、测试或受控环境
 - `data/connection_cache.json` 中会保存密码明文，共用电脑时请注意访问控制，必要时手动清空
 - PICO 相关部署和日志导出依赖 ORIN 跳板，必须先成功连接 ORIN
-- 整包部署的目标处理器连接信息来自当前页面连接信息和缓存，不来自 `static/deploy_config.json`
+- 整包部署的目标处理器连接信息来自当前页面连接信息和缓存，不来自 `static/page_configs/deploy.json`
 - 整包部署如果停在“等待继续”，通常是因为还没有确认机型
 - 文件服务器路径模式可跳过浏览器上传，但前提是后端能够访问配置中的文件服务器
 - 扫描远程根目录 `/` 会比较慢，建议优先选择业务目录

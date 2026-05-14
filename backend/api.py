@@ -17,6 +17,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Str
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .agent_tools import agent_tool_registry
+from .chat import invoke_chat_model
 from .config import (
     DEPLOY_CONFIG_PATH,
     MAX_TASK_ITEMS,
@@ -28,7 +30,7 @@ from .config import (
     SESSION_IDLE_TIMEOUT_SECONDS,
     STATIC_DIR,
 )
-from .models import ApiError, ConnectPayload, ConnectionConfig, ExecutePayload, InstallDebPayload, RosServiceCallPayload, RosTopicPublishPayload
+from .models import AgentToolCallPayload, ApiError, ChatRequestPayload, ConnectPayload, ConnectionConfig, ExecutePayload, InstallDebPayload, RosServiceCallPayload, RosTopicPublishPayload
 from .runtime import connection_cache_store, deploy_config_store, history_store, session_store, task_manager, templates, upload_progress_manager
 from .services import (
     build_file_replace_history,
@@ -36,6 +38,7 @@ from .services import (
     create_deploy_runner,
     create_history_rollback_runner,
     create_module_deploy_runner,
+    current_robot_password,
     ensure_client_connected,
     refresh_remote_shortcuts,
     resolve_deploy_target,
@@ -85,6 +88,31 @@ def create_app() -> FastAPI:
         if created_at <= 0:
             raise ApiError(f"日志文件缺少可用创建时间，无法筛选: {str(entry.get('path') or name).strip()}")
         return created_at
+
+    def build_unique_deploy_filename(file_name: str, *, reason: str = "retry") -> str:
+        base_name = os.path.basename(str(file_name or "").strip())
+        if not base_name:
+            raise ApiError("文件名不能为空")
+        stem, suffix = os.path.splitext(base_name)
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        return f"{stem}_{reason}_{stamp}{suffix}"
+
+    def is_reusable_existing_remote_package(client, remote_path: str, expected_username: str) -> tuple[bool, dict[str, Any]]:
+        if not client.path_exists(remote_path):
+            return False, {"exists": False}
+        try:
+            owner = client.get_remote_file_owner(remote_path)
+        except Exception as exc:  # noqa: BLE001
+            return False, {"exists": True, "error": str(exc)}
+        normalized_owner = str(owner or "").strip()
+        normalized_expected = str(expected_username or "").strip()
+        reusable = bool(normalized_owner and normalized_owner == normalized_expected)
+        return reusable, {
+            "exists": True,
+            "owner": normalized_owner,
+            "expected_owner": normalized_expected,
+            "reusable": reusable,
+        }
 
     def collect_log_files(
         *,
@@ -506,6 +534,39 @@ def create_app() -> FastAPI:
         }
         return {"ok": True, "message": "已断开连接"}
 
+    @app.post("/api/chat")
+    def api_chat(payload: ChatRequestPayload, request: Request):
+        session = get_session(request)
+        last_config = session.get("last_config") or {}
+        result = invoke_chat_model(
+            payload.message,
+            history=[item.model_dump() for item in payload.history],
+            runtime_context={
+                "connected": bool(session["client"].connected),
+                "host": str(last_config.get("host") or ""),
+                "port": str(last_config.get("port") or ""),
+                "username": str(last_config.get("username") or ""),
+                "preferred_root": str(session.get("preferred_root") or "/"),
+                "remote_shortcuts": session.get("remote_shortcuts") or [],
+                "recent_tasks": task_manager.list_tasks_for_owner(get_session_id(request), MAX_TASK_ITEMS),
+            },
+            tool_context={"session": session},
+        )
+        return {"ok": True, **result}
+
+    @app.get("/api/agent/tools")
+    def api_agent_tools():
+        return {"ok": True, "items": agent_tool_registry.list_definitions()}
+
+    @app.post("/api/agent/tool-call")
+    def api_agent_tool_call(payload: AgentToolCallPayload, request: Request):
+        result = agent_tool_registry.call_tool(
+            payload.name,
+            payload.arguments,
+            {"session": get_session(request)},
+        )
+        return {"ok": True, "result": result}
+
     @app.get("/api/connection-cache")
     def api_connection_cache():
         return {"ok": True, "saved_connections": connection_cache_store.list_entries()}
@@ -573,7 +634,7 @@ def create_app() -> FastAPI:
     def api_ros_topic_echo(request: Request, name: str = ""):
         client = ensure_client_connected(get_session(request))
         topic_name = normalize_ros_name(name, label="topic 名称")
-        result = run_rosbridge_command(client, f"timeout 5s rostopic echo -n 1 {shlex.quote(topic_name)}", timeout=8.0)
+        result = run_rosbridge_command(client, f"timeout 3s rostopic echo -n 1 {shlex.quote(topic_name)}", timeout=5.0)
         return {"ok": True, "name": topic_name, "output": build_command_output_text(result)}
 
     @app.post("/api/ros/topic-pub")
@@ -674,9 +735,29 @@ def create_app() -> FastAPI:
                 selected_file_name = os.path.basename(deb_file.filename or "") or selected_file_name
             resolved_remote_dir, selected_file_name, remote_path = resolve_deploy_target(client, selected_file_name)
             remote_exists = client.path_exists(remote_path)
+            has_source_input = bool(str(server_file_path or "").strip() or deb_file is not None)
+            reuse_state: dict[str, Any] = {"exists": remote_exists}
+            can_reuse_remote = False
+            cleanup_existing_remote_files = True
+            if remote_exists:
+                can_reuse_remote, reuse_state = is_reusable_existing_remote_package(client, remote_path, str(target.get("username") or ""))
             if auto_deploy_flag and remote_exists and not replace_existing_flag:
                 use_existing_remote_flag = True
-            if remote_exists and not replace_existing_flag and not use_existing_remote_flag:
+            if use_existing_remote_flag and remote_exists and not can_reuse_remote:
+                if has_source_input:
+                    selected_file_name = build_unique_deploy_filename(selected_file_name, reason="reupload")
+                    resolved_remote_dir, selected_file_name, remote_path = resolve_deploy_target(client, selected_file_name)
+                    remote_exists = client.path_exists(remote_path)
+                    use_existing_remote_flag = False
+                    cleanup_existing_remote_files = False
+                else:
+                    cleanup_existing_remote_files = False
+                    reuse_state = {
+                        **reuse_state,
+                        "fallback": "sudo_chmod",
+                        "message": "远端包所有者不匹配，但继续走 sudo 兜底权限修复",
+                    }
+            if remote_exists and not replace_existing_flag and not use_existing_remote_flag and not has_source_input:
                 raise ApiError(f"远程已存在同名文件: {remote_path}", status_code=409, payload={"conflict": {"remote_path": remote_path, "file_name": selected_file_name, "remote_dir": resolved_remote_dir}})
             if use_existing_remote_flag and not remote_exists:
                 raise ApiError(f"远端不存在可直接安装的文件: {remote_path}")
@@ -706,10 +787,11 @@ def create_app() -> FastAPI:
                 file_bytes=file_bytes,
                 source_metadata=source_metadata,
                 skip_upload=use_existing_remote_flag,
+                cleanup_existing_remote_files=cleanup_existing_remote_files,
                 upload_token=str(upload_token or "").strip(),
                 owner_id=session_id,
             )
-            metadata.update({"deploy_mode": "package", "remote_dir": resolved_remote_dir, "remote_path": remote_path, "deploy_config_path": str(DEPLOY_CONFIG_PATH), "machine_type": str(deploy_profile.get("machine_type") or ""), "device_type": str(target.get("device_type") or device_type).upper(), "target_host": str(target.get("host") or ""), "target_port": int(target.get("port") or 22), "target_username": str(target.get("username") or ""), "used_existing_remote": use_existing_remote_flag, "replaced_existing_remote": bool(remote_exists and replace_existing_flag), "source_kind": str(source_metadata.get("source_kind") or ""), "source_path": str(source_metadata.get("source_path") or ""), "download_path": str(source_metadata.get("download_path") or "")})
+            metadata.update({"deploy_mode": "package", "remote_dir": resolved_remote_dir, "remote_path": remote_path, "deploy_config_path": str(DEPLOY_CONFIG_PATH), "machine_type": str(deploy_profile.get("machine_type") or ""), "device_type": str(target.get("device_type") or device_type).upper(), "target_host": str(target.get("host") or ""), "target_port": int(target.get("port") or 22), "target_username": str(target.get("username") or ""), "used_existing_remote": use_existing_remote_flag, "replaced_existing_remote": bool(remote_exists and replace_existing_flag), "source_kind": str(source_metadata.get("source_kind") or ""), "source_path": str(source_metadata.get("source_path") or ""), "download_path": str(source_metadata.get("download_path") or ""), "remote_reuse_state": reuse_state})
             return {"ok": True, "task": task_manager.create_task("deployment", title, metadata, runner, owner_id=session_id)}
         finally:
             if should_close_target_client:
@@ -746,6 +828,15 @@ def create_app() -> FastAPI:
                 selected_file_name = os.path.basename(deb_file.filename or "") or selected_file_name
             resolved_remote_dir, selected_file_name, remote_path = resolve_deploy_target(client, selected_file_name)
             remote_exists = client.path_exists(remote_path)
+            has_source_input = bool(str(server_file_path or "").strip() or deb_file is not None)
+            can_reuse_remote = False
+            if remote_exists:
+                can_reuse_remote, _ = is_reusable_existing_remote_package(client, remote_path, str(target.get("username") or ""))
+            if use_existing_remote_flag and remote_exists and not can_reuse_remote and has_source_input:
+                selected_file_name = build_unique_deploy_filename(selected_file_name, reason="reupload")
+                resolved_remote_dir, selected_file_name, remote_path = resolve_deploy_target(client, selected_file_name)
+                remote_exists = client.path_exists(remote_path)
+                use_existing_remote_flag = False
             if remote_exists and not replace_existing_flag and not use_existing_remote_flag:
                 raise ApiError(
                     f"远程已存在同名文件: {remote_path}",
@@ -799,7 +890,11 @@ def create_app() -> FastAPI:
                     )
                 resolved_remote_dir, selected_file_name, remote_path = resolve_deploy_target(client, selected_file_name)
                 package_prefix = selected_file_name.split("_", 1)[0].strip() or selected_file_name
-                removed_files = client.remove_files_by_prefix(resolved_remote_dir, package_prefix)
+                removed_files = client.remove_files_by_prefix(
+                    resolved_remote_dir,
+                    package_prefix,
+                    sudo_password=str(target.get("password") or ""),
+                )
                 for removed_file in removed_files:
                     if removed_file != remote_path:
                         pass
@@ -1199,7 +1294,7 @@ def create_app() -> FastAPI:
             backup_path = None
             if parse_bool(backup_before_replace):
                 upload_progress_manager.update(upload_token, phase="backing_up", message="正在备份远端文件")
-                backup_path = client.backup_remote_path(target_path)
+                backup_path = client.backup_remote_path(target_path, sudo_password=current_robot_password(session))
             client.upload_bytes(raw_bytes, target_path, progress_callback=lambda transferred, total: upload_progress_manager.update(upload_token, transferred_bytes=transferred, total_bytes=total, phase="uploading_to_robot", message=f"正在上传到机器人: {target_path}"))
             upload_progress_manager.update(upload_token, transferred_bytes=len(raw_bytes), total_bytes=len(raw_bytes), phase="completed", message=f"文件已上传并替换: {target_path}", done=True)
             history_id = build_file_replace_history(session, target_path, backup_path, {"remote_path": target_path, "backup_path": backup_path or ""})
