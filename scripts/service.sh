@@ -6,18 +6,8 @@ BASE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUNTIME_DIR="$BASE_DIR/.runtime"
 PID_FILE="$RUNTIME_DIR/app.pid"
 LOG_FILE="$RUNTIME_DIR/app.log"
-if [[ -n "${PYTHON_BIN:-}" ]]; then
-  PYTHON_BIN="$PYTHON_BIN"
-elif [[ -n "${CONDA_PREFIX:-}" && -x "${CONDA_PREFIX}/bin/python" ]]; then
-  PYTHON_BIN="${CONDA_PREFIX}/bin/python"
-elif [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
-  PYTHON_BIN="${VIRTUAL_ENV}/bin/python"
-else
-  PYTHON_BIN="python3"
-fi
 APP_HOST="${APP_HOST:-0.0.0.0}"
 APP_PORT="${APP_PORT:-8000}"
-START_CMD=("$PYTHON_BIN" -m backend.main)
 STOP_TIMEOUT=30
 
 mkdir -p "$RUNTIME_DIR"
@@ -42,6 +32,71 @@ is_running() {
   local pid="$1"
   kill -0 "$pid" 2>/dev/null
 }
+
+can_import_backend() {
+  local py="$1"
+  (
+    cd "$BASE_DIR"
+    PYTHONPATH="$BASE_DIR:${PYTHONPATH:-}" "$py" -c "import backend.main"
+  ) >/dev/null 2>&1
+}
+
+resolve_python_bin() {
+  local -a candidates=()
+  local py
+
+  if [[ -n "${PYTHON_BIN:-}" ]]; then
+    candidates+=("$PYTHON_BIN")
+  fi
+
+  if [[ -n "${CONDA_EXE:-}" ]]; then
+    local conda_root
+    conda_root="$(cd "$(dirname "$CONDA_EXE")/.." && pwd)"
+    candidates+=(
+      "$conda_root/envs/py311/bin/python"
+      "$conda_root/envs/py310/bin/python"
+    )
+  fi
+
+  if [[ -n "${CONDA_PREFIX:-}" && -x "${CONDA_PREFIX}/bin/python" ]]; then
+    candidates+=("${CONDA_PREFIX}/bin/python")
+  fi
+
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    candidates+=("${VIRTUAL_ENV}/bin/python")
+  fi
+
+  candidates+=("python3" "python")
+
+  for py in "${candidates[@]}"; do
+    [[ -n "$py" ]] || continue
+    if ! command -v "$py" >/dev/null 2>&1; then
+      continue
+    fi
+    py="$(command -v "$py")"
+    if can_import_backend "$py"; then
+      printf '%s\n' "$py"
+      return 0
+    fi
+  done
+
+  for py in "${candidates[@]}"; do
+    [[ -n "$py" ]] || continue
+    if command -v "$py" >/dev/null 2>&1; then
+      command -v "$py"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+if ! PYTHON_BIN="$(resolve_python_bin)"; then
+  echo "未找到可用的 Python 可执行文件" >&2
+  exit 1
+fi
+
+START_CMD=("$PYTHON_BIN" -m backend.main)
 
 port_in_use() {
   "$PYTHON_BIN" - "$APP_HOST" "$APP_PORT" <<'PY'
@@ -87,10 +142,11 @@ check_runtime() {
     return 1
   fi
 
-  if ! "$PYTHON_BIN" -c "import backend.main" >/dev/null 2>&1; then
-    echo "当前 Python 环境缺少运行依赖，无法导入 backend.main: $PYTHON_BIN" >&2
+  if ! can_import_backend "$PYTHON_BIN"; then
+    echo "当前 Python 环境无法导入 backend.main: $PYTHON_BIN" >&2
+    echo "项目目录: $BASE_DIR" >&2
     echo "可先安装依赖，或通过 PYTHON_BIN 指定可用环境，例如:" >&2
-    echo "  PYTHON_BIN=/path/to/python ./service.sh start" >&2
+    echo "  PYTHON_BIN=/path/to/python ./scripts/service.sh start" >&2
     return 1
   fi
 }

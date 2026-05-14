@@ -57,3 +57,10 @@ class RosTopicPublishPayload(BaseModel):
 class RosServiceCallPayload(BaseModel):
     name: str
     request: str = ""
+class AudioMonitorConfigEntryPayload(BaseModel):
+    module: str
+    enable: bool
+
+
+class AudioMonitorConfigSavePayload(BaseModel):
+    entries: list[AudioMonitorConfigEntryPayload]

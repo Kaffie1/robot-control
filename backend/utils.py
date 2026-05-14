@@ -63,6 +63,17 @@ def parse_bool(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def load_json_config(path: Path, default_payload: Any, *, label: str = "配置") -> Any:
+    if not path.exists():
+        return json.loads(json.dumps(default_payload, ensure_ascii=False))
+    try:
+        return json.loads(path.read_text(encoding="utf-8") or "null")
+    except json.JSONDecodeError as exc:
+        raise ApiError(f"{label}格式错误: {exc}") from exc
+    except OSError as exc:
+        raise ApiError(f"读取{label}失败: {exc}") from exc
+
+
 def require_upload(upload: UploadFile | None, message: str) -> UploadFile:
     if upload is None or not str(upload.filename or "").strip():
         raise ApiError(message)
@@ -282,55 +293,6 @@ def prepare_package_bytes(upload: UploadFile | None, server_file_path: str, *, l
         "download_path": "",
         "local_tmp_path": "",
     }
-
-
-def cache_upload_source_file(upload: UploadFile | None, server_file_path: str, *, local_error_message: str) -> tuple[str, Path, int, dict[str, Any]]:
-    source_path = str(server_file_path or "").strip()
-    if source_path:
-        remote_file = resolve_download_source_path(source_path)
-        file_name = os.path.basename(remote_file)
-        if not file_name:
-            raise ApiError(f"无法从文件服务器路径解析文件名: {remote_file}")
-        suffix = Path(file_name).suffix
-        with tempfile.NamedTemporaryFile(prefix="offline-image-", suffix=suffix, dir=str(DOWNLOAD_TMP_DIR), delete=False) as tmp_file:
-            local_file = Path(tmp_file.name)
-        download_file_from_chfs(remote_file, local_file)
-        try:
-            file_size = int(local_file.stat().st_size)
-        except OSError as exc:
-            raise ApiError(f"读取下载后的本地缓存文件失败: {local_file}") from exc
-        return file_name, local_file, file_size, {
-            "source_kind": "file_server",
-            "source_path": source_path,
-            "download_path": remote_file,
-            "local_tmp_path": str(local_file),
-        }
-
-    resolved_upload = require_upload(upload, local_error_message)
-    file_name = os.path.basename(resolved_upload.filename or "")
-    if not file_name:
-        raise ApiError(local_error_message)
-    suffix = "".join(Path(file_name).suffixes) or Path(file_name).suffix
-    with tempfile.NamedTemporaryFile(prefix="offline-image-", suffix=suffix, dir=str(DOWNLOAD_TMP_DIR), delete=False) as tmp_file:
-        local_file = Path(tmp_file.name)
-        total_bytes = 0
-        while True:
-            chunk = resolved_upload.file.read(1024 * 1024)
-            if not chunk:
-                break
-            tmp_file.write(chunk)
-            total_bytes += len(chunk)
-    try:
-        resolved_upload.file.close()
-    except Exception:  # noqa: BLE001
-        pass
-    return file_name, local_file, total_bytes, {
-        "source_kind": "local_upload",
-        "source_path": "",
-        "download_path": "",
-        "local_tmp_path": str(local_file),
-    }
-
 
 def log_command_result(ctx, label: str, result: dict[str, Any]) -> None:
     ctx.log(f"{label}退出码: {result.get('exit_code', '')}")

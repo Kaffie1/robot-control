@@ -214,11 +214,11 @@ class DeployConfigStore:
                 raw = self.config_path.read_text(encoding="utf-8")
                 parsed = json.loads(raw or "{}")
             except json.JSONDecodeError as exc:
-                raise ApiError(f"deploy_config.json 格式错误: {exc}") from exc
+                raise ApiError(f"{self.config_path.name} 格式错误: {exc}") from exc
             except OSError as exc:
-                raise ApiError(f"读取 deploy_config.json 失败: {exc}") from exc
+                raise ApiError(f"读取 {self.config_path.name} 失败: {exc}") from exc
             if not isinstance(parsed, dict):
-                raise ApiError("deploy_config.json 顶层必须是对象")
+                raise ApiError(f"{self.config_path.name} 顶层必须是对象")
             return {key: normalize_deploy_profile(parsed.get(key), defaults) for key, defaults in self.defaults.items()}
 
     def _write(self, payload: dict[str, dict[str, Any]]) -> None:

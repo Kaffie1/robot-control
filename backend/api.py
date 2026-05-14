@@ -36,12 +36,11 @@ from .services import (
     create_deploy_runner,
     create_history_rollback_runner,
     create_module_deploy_runner,
-    create_offline_image_deploy_runner,
     ensure_client_connected,
     refresh_remote_shortcuts,
     resolve_deploy_target,
 )
-from .utils import cache_upload_source_file, get_asset_version, parse_bool, prepare_package_bytes, render_remote_command, require_text, require_upload, resolve_download_source_path
+from .utils import get_asset_version, parse_bool, prepare_package_bytes, render_remote_command, require_text, require_upload, resolve_download_source_path
 
 
 @asynccontextmanager
@@ -176,6 +175,151 @@ def create_app() -> FastAPI:
         if not ros_type_pattern.fullmatch(normalized_type_name):
             raise ApiError(f"非法消息类型: {normalized_type_name}")
         return normalized_type_name
+
+    ros_builtin_types = {
+        "bool",
+        "byte",
+        "char",
+        "int8",
+        "uint8",
+        "int16",
+        "uint16",
+        "int32",
+        "uint32",
+        "int64",
+        "uint64",
+        "float32",
+        "float64",
+        "string",
+        "time",
+        "duration",
+    }
+
+    def strip_ros_comment(line: str) -> str:
+        return str(line or "").split("#", 1)[0].rstrip()
+
+    def normalize_ros_field_type(field_type: str) -> str:
+        return re.sub(r"\[[^\]]*\]$", "", str(field_type or "").strip())
+
+    def resolve_ros_nested_type(field_type: str, current_package: str) -> str:
+        normalized_field_type = normalize_ros_field_type(field_type)
+        if not normalized_field_type or normalized_field_type in ros_builtin_types:
+            return ""
+        if "/" in normalized_field_type:
+            return normalize_ros_type_name(normalized_field_type)
+        if normalized_field_type == "Header":
+            return "std_msgs/Header"
+        return normalize_ros_type_name(f"{current_package}/{normalized_field_type}")
+
+    def split_ros_service_sections(source_text: str) -> list[list[str]]:
+        sections: list[list[str]] = [[]]
+        for raw_line in str(source_text or "").splitlines():
+            if raw_line.strip() == "---":
+                sections.append([])
+                continue
+            sections[-1].append(raw_line)
+        return sections
+
+    def expand_ros_interface_lines(
+        client,
+        type_name: str,
+        *,
+        interface_kind: str,
+        source_text: str,
+        seen_types: set[str] | None = None,
+    ) -> list[str]:
+        normalized_type_name = normalize_ros_type_name(type_name)
+        current_package, _ = normalized_type_name.split("/", 1)
+        visited = set(seen_types or set())
+        visited.add(normalized_type_name)
+        expanded_lines: list[str] = []
+
+        for raw_line in str(source_text or "").splitlines():
+            line_text = str(raw_line).rstrip()
+            code_text = strip_ros_comment(raw_line).strip()
+            expanded_lines.append(line_text)
+            if not code_text or code_text == "---" or "=" in code_text:
+                continue
+            match = re.match(r"^([A-Za-z][A-Za-z0-9_/]*(?:\[[^\]]*\])?)\s+([A-Za-z][A-Za-z0-9_]*)$", code_text)
+            if not match:
+                continue
+            nested_type_name = resolve_ros_nested_type(match.group(1), current_package)
+            if not nested_type_name or nested_type_name in visited:
+                continue
+            nested_source = read_ros_interface_source(
+                client,
+                nested_type_name,
+                interface_kind=interface_kind,
+                expand_nested=False,
+            )
+            nested_lines = expand_ros_interface_lines(
+                client,
+                nested_type_name,
+                interface_kind=interface_kind,
+                source_text=str(nested_source.get("raw_output") or ""),
+                seen_types=visited | {nested_type_name},
+            )
+            expanded_lines.extend([f"  {line}" if line else "" for line in nested_lines])
+        return expanded_lines
+
+    def read_ros_interface_source(
+        client,
+        type_name: str,
+        *,
+        interface_kind: str,
+        expand_nested: bool = True,
+    ) -> dict[str, Any]:
+        normalized_type_name = normalize_ros_type_name(type_name)
+        package_name, interface_name = normalized_type_name.split("/", 1)
+        extension = "msg" if interface_kind == "msg" else "srv"
+        relative_source_path = f"share/{package_name}/{extension}/{interface_name}.{extension}"
+        resolve_command = (
+            "found=''; "
+            f"for candidate in /opt/ros/*/{shlex.quote(relative_source_path)}; do "
+            "if [ -f \"$candidate\" ]; then found=\"$candidate\"; break; fi; "
+            "done; "
+            "if [ -z \"$found\" ]; then exit 1; fi; "
+            "printf '%s\\n' \"$found\"; "
+            "cat \"$found\""
+        )
+        result = run_rosbridge_command(client, resolve_command)
+        command_output = build_command_output_text(result)
+        output_lines = command_output.splitlines()
+        source_path = output_lines[0].strip() if output_lines else ""
+        raw_output = "\n".join(output_lines[1:]).strip()
+        if not source_path or not raw_output:
+            raise ApiError(f"未读取到 {interface_kind} 源文件: /opt/ros/*/{relative_source_path}")
+        output = raw_output
+        if expand_nested:
+            if interface_kind == "srv":
+                sections = split_ros_service_sections(raw_output)
+                expanded_sections = [
+                    "\n".join(
+                        expand_ros_interface_lines(
+                            client,
+                            normalized_type_name,
+                            interface_kind="msg",
+                            source_text="\n".join(section_lines),
+                        )
+                    ).rstrip()
+                    for section_lines in sections
+                ]
+                output = "\n---\n".join(expanded_sections).rstrip()
+            else:
+                output = "\n".join(
+                    expand_ros_interface_lines(
+                        client,
+                        normalized_type_name,
+                        interface_kind=interface_kind,
+                        source_text=raw_output,
+                    )
+                ).rstrip()
+        return {
+            "type_name": normalized_type_name,
+            "source_path": source_path,
+            "output": output,
+            "raw_output": raw_output,
+        }
 
     def run_rosbridge_command(client, command: str, *, timeout: float = 20.0) -> dict[str, Any]:
         result = client.exec_compose_service_command(
@@ -413,8 +557,17 @@ def create_app() -> FastAPI:
     def api_ros_message_definition(request: Request, type_name: str = ""):
         client = ensure_client_connected(get_session(request))
         normalized_type_name = normalize_ros_type_name(type_name)
-        result = run_rosbridge_command(client, f"rosmsg show {shlex.quote(normalized_type_name)}")
-        return {"ok": True, "type_name": normalized_type_name, "output": build_command_output_text(result)}
+        try:
+            source_payload = read_ros_interface_source(client, normalized_type_name, interface_kind="msg")
+            return {
+                "ok": True,
+                "type_name": str(source_payload.get("type_name") or normalized_type_name),
+                "source_path": str(source_payload.get("source_path") or ""),
+                "output": str(source_payload.get("output") or ""),
+            }
+        except Exception:
+            result = run_rosbridge_command(client, f"rosmsg show {shlex.quote(normalized_type_name)}")
+            return {"ok": True, "type_name": normalized_type_name, "source_path": "", "output": build_command_output_text(result)}
 
     @app.get("/api/ros/topic-echo")
     def api_ros_topic_echo(request: Request, name: str = ""):
@@ -455,13 +608,24 @@ def create_app() -> FastAPI:
         service_name = normalize_ros_name(name, label="service 名称")
         type_result = run_rosbridge_command(client, f"rosservice type {shlex.quote(service_name)}")
         normalized_type_name = normalize_ros_type_name(build_command_output_text(type_result).splitlines()[0] if build_command_output_text(type_result) else "")
-        definition_result = run_rosbridge_command(client, f"rossrv show {shlex.quote(normalized_type_name)}")
-        return {
-            "ok": True,
-            "name": service_name,
-            "type_name": normalized_type_name,
-            "output": build_command_output_text(definition_result),
-        }
+        try:
+            source_payload = read_ros_interface_source(client, normalized_type_name, interface_kind="srv")
+            return {
+                "ok": True,
+                "name": service_name,
+                "type_name": str(source_payload.get("type_name") or normalized_type_name),
+                "source_path": str(source_payload.get("source_path") or ""),
+                "output": str(source_payload.get("output") or ""),
+            }
+        except Exception:
+            definition_result = run_rosbridge_command(client, f"rossrv show {shlex.quote(normalized_type_name)}")
+            return {
+                "ok": True,
+                "name": service_name,
+                "type_name": normalized_type_name,
+                "source_path": "",
+                "output": build_command_output_text(definition_result),
+            }
 
     @app.post("/api/ros/service-call")
     def api_ros_service_call(payload: RosServiceCallPayload, request: Request):
@@ -867,115 +1031,6 @@ def create_app() -> FastAPI:
             }
         )
         return {"ok": True, "task": task_manager.create_task("deployment", title, metadata, runner, owner_id=session_id)}
-
-    @app.post("/api/deploy-offline-image")
-    def api_deploy_offline_image(
-        request: Request,
-        device_type: str = Form("ORIN"),
-        file_name: str = Form(""),
-        server_file_path: str = Form(""),
-        replace_existing: str = Form(""),
-        use_existing_remote: str = Form(""),
-        upload_token: str = Form(""),
-        image_file: UploadFile | None = File(None),
-    ):
-        session = get_session(request)
-        session_id = get_session_id(request)
-        client, should_close_target_client, target = create_package_target_client(
-            session,
-            device_type,
-        )
-        replace_existing_flag = parse_bool(replace_existing)
-        use_existing_remote_flag = parse_bool(use_existing_remote)
-        if replace_existing_flag and use_existing_remote_flag:
-            raise ApiError("同名文件处理参数冲突")
-        local_file_path = ""
-        try:
-            selected_file_name = os.path.basename(file_name or "")
-            if str(server_file_path or "").strip():
-                selected_file_name = os.path.basename(resolve_download_source_path(server_file_path))
-            elif image_file is not None:
-                selected_file_name = os.path.basename(image_file.filename or "") or selected_file_name
-            resolved_remote_dir, selected_file_name, remote_path = resolve_deploy_target(client, selected_file_name)
-            remote_exists = client.path_exists(remote_path)
-            if remote_exists and not replace_existing_flag and not use_existing_remote_flag:
-                raise ApiError(
-                    f"远程已存在同名文件: {remote_path}",
-                    status_code=409,
-                    payload={"conflict": {"remote_path": remote_path, "file_name": selected_file_name, "remote_dir": resolved_remote_dir}},
-                )
-            if use_existing_remote_flag and not remote_exists:
-                raise ApiError(f"远端不存在可直接导入的镜像文件: {remote_path}")
-
-            if use_existing_remote_flag:
-                local_file_size = 0
-                source_metadata = {"source_kind": "existing_remote", "source_path": "", "download_path": "", "local_tmp_path": ""}
-            else:
-                if str(server_file_path or "").strip():
-                    download_path = resolve_download_source_path(server_file_path)
-                    upload_progress_manager.start(
-                        str(upload_token or "").strip(),
-                        file_name=os.path.basename(download_path),
-                        phase="downloading_from_server",
-                        message=f"正在从文件服务器下载: {download_path}",
-                        owner_id=session_id,
-                    )
-                selected_file_name, local_cached_file, local_file_size, source_metadata = cache_upload_source_file(
-                    image_file,
-                    server_file_path,
-                    local_error_message="请选择要导入的离线镜像文件或填写文件服务器包路径",
-                )
-                local_file_path = str(local_cached_file)
-                if str(server_file_path or "").strip():
-                    upload_progress_manager.update(
-                        str(upload_token or "").strip(),
-                        transferred_bytes=local_file_size,
-                        total_bytes=local_file_size,
-                        phase="queued",
-                        message="镜像已从文件服务器下载，准备创建离线镜像部署任务",
-                    )
-                resolved_remote_dir, selected_file_name, remote_path = resolve_deploy_target(client, selected_file_name)
-
-            title, metadata, runner = create_offline_image_deploy_runner(
-                session,
-                device_type=str(target.get("device_type") or device_type).upper(),
-                image_file_name=selected_file_name,
-                local_file_path=local_file_path,
-                local_file_size=local_file_size,
-                source_metadata=source_metadata,
-                skip_upload=use_existing_remote_flag,
-                upload_token=str(upload_token or "").strip(),
-                owner_id=session_id,
-            )
-            metadata.update(
-                {
-                    "deploy_mode": "offline_image",
-                    "remote_dir": resolved_remote_dir,
-                    "remote_path": remote_path,
-                    "device_type": str(target.get("device_type") or device_type).upper(),
-                    "target_host": str(target.get("host") or ""),
-                    "target_port": int(target.get("port") or 22),
-                    "target_username": str(target.get("username") or ""),
-                    "used_existing_remote": use_existing_remote_flag,
-                    "replaced_existing_remote": bool(remote_exists and replace_existing_flag),
-                    "image_file_name": selected_file_name,
-                    "local_file_size": local_file_size,
-                    "source_kind": str(source_metadata.get("source_kind") or ""),
-                    "source_path": str(source_metadata.get("source_path") or ""),
-                    "download_path": str(source_metadata.get("download_path") or ""),
-                }
-            )
-            return {"ok": True, "task": task_manager.create_task("deployment", title, metadata, runner, owner_id=session_id)}
-        except Exception:
-            if local_file_path:
-                try:
-                    os.remove(local_file_path)
-                except OSError:
-                    pass
-            raise
-        finally:
-            if should_close_target_client:
-                client.close()
 
     @app.get("/api/tasks")
     def api_tasks(request: Request, limit: int = MAX_TASK_ITEMS):

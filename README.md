@@ -7,7 +7,6 @@
 1. 通过 SSH 连接 ORIN，并缓存最近使用的 ORIN / PICO 连接信息
 2. 执行整包部署，支持本地上传 `firmware` 包或直接填写文件服务器路径
 3. 执行模块部署，按模块替换 `.deb` 并重启对应容器
-4. 执行离线镜像部署，导入本地或文件服务器上的镜像包
 5. 在后台持续跟踪任务状态、执行结果和详细日志
 6. 保存部署历史、文件替换历史和回滚历史
 7. 对支持的历史记录执行一键回滚
@@ -81,13 +80,13 @@ PYTHON_BIN=/path/to/python APP_PORT=9000 ./service.sh start
 1. 打开页面后，先在 `远程连接` 页填写 ORIN 主机、端口、用户名和密码
 2. 如果后续要部署 PICO 或导出 PICO 日志，同时填写 PICO 主机、端口、用户名和密码
 3. 点击 `连接机器人`，确认右上角状态变为 `已连接`
-4. 进入 `部署` 页，根据现场场景选择 `整包部署`、`模块部署` 或 `离线镜像部署`
+4. 进入 `部署` 页，根据现场场景选择 `整包部署` 或 `模块部署`
 5. 选择本地文件，或直接填写文件服务器包路径
 6. 创建部署任务后，在 `后台任务` 中持续查看实时日志和结果
 7. 如遇异常，进入 `日志` 页导出 ORIN / PICO 日志压缩包用于排查
 8. 如需恢复，可在历史记录中对支持的任务执行回滚
 
-## 三种部署方式
+## 两种部署方式
 
 ### 1. 整包部署
 
@@ -121,17 +120,10 @@ PYTHON_BIN=/path/to/python APP_PORT=9000 ./service.sh start
 /home/naviai/navi_project/.dists
 ```
 
-### 3. 离线镜像部署
-
-- 适合导入 Docker 离线镜像
-- 支持本地上传，也支持填写文件服务器路径
-- 创建任务后会先上传镜像，再执行导入命令
-- 更适合网络受限、镜像已提前放在共享目录的场景
-
 ## 页面功能说明
 
 - `远程连接`：连接 ORIN / PICO，管理最近使用的缓存连接
-- `部署`：执行整包部署、模块部署、离线镜像部署，并查看后台任务
+- `部署`：执行整包部署、模块部署，并查看后台任务
 - `日志`：导出 ORIN / PICO 日志压缩包
 - `使用说明`：页面内置的操作流程、部署方式和排障提示
 - `飞书云文档`：展示已配置的飞书文档链接
@@ -155,17 +147,25 @@ PYTHON_BIN=/path/to/python APP_PORT=9000 ./service.sh start
 
 ### 自动部署配置
 
-静态目录下保留了自动部署版本列表配置：
+静态目录下保留了按页面拆分的配置文件：
 
-- `static/auto_deploy.json`
-- `static/deploy_config.json`
-- `static/feishu_docs.json`
+- `static/page_configs/deploy.auto.json`
+- `static/page_configs/deploy.json`
+- `static/page_configs/ros.filters.json`
+- `static/page_configs/ros.json`
+- `static/page_configs/config.json`
+- `static/page_configs/logs.json`
+- `static/page_configs/feishu-doc.json`
 
 其中：
 
-- `auto_deploy.json` 用于页面中的自动部署版本下拉
-- `deploy_config.json` 用于后端部署命令模板和页面下拉项配置
-- `feishu_docs.json` 用于页面中的飞书云文档入口
+- `deploy.auto.json` 用于页面中的自动部署版本下拉
+- `deploy.json` 用于后端部署命令模板和部署页下拉项配置
+- `ros.filters.json` 用于 ROS 页的前端筛选规则
+- `ros.json` 用于 ROS 页的容器与命令模板配置
+- `config.json` 用于配置页的远端文件路径与 reload service 配置
+- `logs.json` 用于日志页的默认远端日志目录配置
+- `feishu-doc.json` 用于页面中的飞书云文档入口
 
 ## 数据文件
 

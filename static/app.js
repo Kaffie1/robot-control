@@ -22,10 +22,6 @@ const moduleAutoDeployHint = document.getElementById("moduleAutoDeployHint");
 const moduleDeployDropzone = document.getElementById("moduleDeployDropzone");
 const moduleDeployFileInput = document.getElementById("moduleDeployFileInput");
 const moduleDeployFileMeta = document.getElementById("moduleDeployFileMeta");
-const offlineImageDeployForm = document.getElementById("offlineImageDeployForm");
-const offlineImageDeployDropzone = document.getElementById("offlineImageDeployDropzone");
-const offlineImageDeployFileInput = document.getElementById("offlineImageDeployFileInput");
-const offlineImageDeployFileMeta = document.getElementById("offlineImageDeployFileMeta");
 const moduleSelect = document.getElementById("moduleSelect");
 const taskList = document.getElementById("taskList");
 const taskDetailOutput = document.getElementById("taskDetailOutput");
@@ -35,6 +31,16 @@ const pageNavButtons = Array.from(document.querySelectorAll("[data-page-target]"
 const pagePanels = Array.from(document.querySelectorAll("[data-page-panel]"));
 const guideNavButtons = Array.from(document.querySelectorAll("[data-guide-target]"));
 const guidePanels = Array.from(document.querySelectorAll("[data-guide-panel]"));
+const configNavButtons = Array.from(document.querySelectorAll("[data-config-target]"));
+const configPanels = Array.from(document.querySelectorAll("[data-config-panel]"));
+const refreshAudioConfigBtn = document.getElementById("refreshAudioConfigBtn");
+const enableAllAudioConfigBtn = document.getElementById("enableAllAudioConfigBtn");
+const disableAllAudioConfigBtn = document.getElementById("disableAllAudioConfigBtn");
+const saveAudioConfigBtn = document.getElementById("saveAudioConfigBtn");
+const audioConfigStatus = document.getElementById("audioConfigStatus");
+const audioConfigToggleList = document.getElementById("audioConfigToggleList");
+const rosNavButtons = Array.from(document.querySelectorAll("[data-ros-target]"));
+const rosPanels = Array.from(document.querySelectorAll("[data-ros-panel]"));
 const feishuDocsList = document.getElementById("feishuDocsList");
 const orinLogModuleSelect = document.getElementById("orinLogModuleSelect");
 const orinLogStatus = document.getElementById("orinLogStatus");
@@ -56,6 +62,7 @@ const rosSelectedTopicType = document.getElementById("rosSelectedTopicType");
 const rosSelectedTopicDirection = document.getElementById("rosSelectedTopicDirection");
 const rosTopicAvailabilityBadge = document.getElementById("rosTopicAvailabilityBadge");
 const rosSelectedServiceName = document.getElementById("rosSelectedServiceName");
+const rosSelectedServiceType = document.getElementById("rosSelectedServiceType");
 const rosPublishTabBtn = document.getElementById("rosPublishTabBtn");
 const rosSubscribeTabBtn = document.getElementById("rosSubscribeTabBtn");
 const rosPublishPanel = document.getElementById("rosPublishPanel");
@@ -65,16 +72,22 @@ const rosTopicTypeBtn = document.getElementById("rosTopicTypeBtn");
 const rosTopicEchoBtn = document.getElementById("rosTopicEchoBtn");
 const rosTopicPubBtn = document.getElementById("rosTopicPubBtn");
 const rosTopicPubPythonBtn = document.getElementById("rosTopicPubPythonBtn");
+const rosTopicPubPythonCopyBtn = document.getElementById("rosTopicPubPythonCopyBtn");
 const rosTopicSubPythonBtn = document.getElementById("rosTopicSubPythonBtn");
+const rosTopicSubPythonCopyBtn = document.getElementById("rosTopicSubPythonCopyBtn");
 const rosTopicPubTypeInput = document.getElementById("rosTopicPubTypeInput");
 const rosTopicPubMessageInput = document.getElementById("rosTopicPubMessageInput");
 const rosTopicPublishHistory = document.getElementById("rosTopicPublishHistory");
+const rosTopicPublishOutput = document.getElementById("rosTopicPublishOutput");
+const rosTopicDefinitionOutput = document.getElementById("rosTopicDefinitionOutput");
 const rosTopicDetailOutput = document.getElementById("rosTopicDetailOutput");
 const rosServiceInfoBtn = document.getElementById("rosServiceInfoBtn");
 const rosServiceTypeBtn = document.getElementById("rosServiceTypeBtn");
 const rosServicePythonBtn = document.getElementById("rosServicePythonBtn");
+const rosServicePythonCopyBtn = document.getElementById("rosServicePythonCopyBtn");
 const rosServiceCallBtn = document.getElementById("rosServiceCallBtn");
 const rosServiceCallRequestInput = document.getElementById("rosServiceCallRequestInput");
+const rosServiceDefinitionOutput = document.getElementById("rosServiceDefinitionOutput");
 const rosServiceDetailOutput = document.getElementById("rosServiceDetailOutput");
 const timeSelectContainers = Array.from(document.querySelectorAll(".log-time-selects"));
 const moduleFilterRoots = Array.from(document.querySelectorAll("[data-module-filter]"));
@@ -95,12 +108,10 @@ const DEFAULT_CONNECTION_FORM = {
 const uploadProgressViews = {
   packageDeploy: createUploadProgressView("packageDeployUploadProgress"),
   moduleDeploy: createUploadProgressView("moduleDeployUploadProgress"),
-  offlineImageDeploy: createUploadProgressView("offlineImageDeployUploadProgress"),
 };
 const deployFlowViews = {
   package: createDeployFlowView("packageDeployFlow"),
   module: createDeployFlowView("moduleDeployFlow"),
-  offline_image: createDeployFlowView("offlineImageDeployFlow"),
 };
 
 let selectedTaskId = "";
@@ -115,12 +126,10 @@ let currentTaskDetailText = "";
 const currentDeployTaskIds = {
   package: "",
   module: "",
-  offline_image: "",
 };
 const deployProgressSnapshots = {
   package: null,
   module: null,
-  offline_image: null,
 };
 const DEFAULT_PACKAGE_MACHINE_OPTIONS = [
   { value: "WA1", label: "WA1" },
@@ -153,6 +162,7 @@ const rosState = {
   selectedServiceType: "",
   selectedServiceDefinition: "",
   activeTab: "publish",
+  activeSection: "topic",
   lastPublishRecord: null,
   hasLoadedTopics: false,
   hasLoadedServices: false,
@@ -162,6 +172,11 @@ const rosFilterConfig = {
   servicePrefixes: [],
   topicNames: [],
   serviceNames: [],
+};
+const audioMonitorState = {
+  entries: [],
+  hasLoaded: false,
+  isSaving: false,
 };
 
 function switchPage(pageName = "remote") {
@@ -183,6 +198,9 @@ function switchPage(pageName = "remote") {
   if (normalizedPage === "ros") {
     ensureRosPageLoaded();
   }
+  if (normalizedPage === "config") {
+    ensureAudioMonitorConfigLoaded();
+  }
 }
 
 function switchGuidePage(pageName = "flow") {
@@ -195,6 +213,182 @@ function switchGuidePage(pageName = "flow") {
   });
   guidePanels.forEach((panel) => {
     const isActive = panel.dataset.guidePanel === normalizedPage;
+    panel.classList.toggle("is-active", isActive);
+    panel.hidden = !isActive;
+  });
+}
+
+function switchConfigPage(pageName = "voice") {
+  const requestedPage = String(pageName || "voice").trim() || "voice";
+  const normalizedPage = configPanels.some((panel) => panel.dataset.configPanel === requestedPage) ? requestedPage : "voice";
+  configNavButtons.forEach((button) => {
+    const isActive = button.dataset.configTarget === normalizedPage;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+  configPanels.forEach((panel) => {
+    const isActive = panel.dataset.configPanel === normalizedPage;
+    panel.classList.toggle("is-active", isActive);
+    panel.hidden = !isActive;
+  });
+  if (normalizedPage === "voice") {
+    ensureAudioMonitorConfigLoaded();
+  }
+}
+
+function setAudioConfigStatus(message, isError = false) {
+  if (!audioConfigStatus) {
+    return;
+  }
+  audioConfigStatus.textContent = message;
+  audioConfigStatus.classList.toggle("is-error", Boolean(isError));
+}
+
+function setAllAudioMonitorEntries(enabled) {
+  if (!audioMonitorState.entries.length) {
+    setAudioConfigStatus("当前没有可批量设置的语音监控模块。", true);
+    return;
+  }
+  audioMonitorState.entries.forEach((entry) => {
+    entry.enable = Boolean(enabled);
+  });
+  renderAudioMonitorConfig();
+  setAudioConfigStatus(enabled ? "已将当前页面中的全部模块设置为开启。记得点击“保存并重载”。" : "已将当前页面中的全部模块设置为关闭。记得点击“保存并重载”。");
+}
+
+function renderAudioMonitorConfig() {
+  if (!audioConfigToggleList) {
+    return;
+  }
+  audioConfigToggleList.replaceChildren();
+  if (!audioMonitorState.entries.length) {
+    const placeholder = document.createElement("div");
+    placeholder.className = "config-placeholder";
+    placeholder.innerHTML = "<strong>当前状态</strong><p>未读取到任何语音监控模块。</p>";
+    audioConfigToggleList.appendChild(placeholder);
+    return;
+  }
+  audioMonitorState.entries.forEach((entry) => {
+    const item = document.createElement("label");
+    item.className = "config-toggle-item";
+
+    const info = document.createElement("div");
+    info.className = "config-toggle-copy";
+
+    const title = document.createElement("strong");
+    title.textContent = entry.module || "-";
+
+    const meta = document.createElement("div");
+    meta.className = "config-toggle-meta";
+    meta.textContent = entry.topic || "未配置 topic";
+
+    info.append(title, meta);
+
+    const toggle = document.createElement("input");
+    toggle.type = "checkbox";
+    toggle.checked = Boolean(entry.enable);
+    toggle.disabled = Boolean(audioMonitorState.isSaving);
+    toggle.addEventListener("change", () => {
+      entry.enable = toggle.checked;
+    });
+
+    const switchShell = document.createElement("span");
+    switchShell.className = "config-switch";
+    switchShell.appendChild(toggle);
+
+    const switchTrack = document.createElement("span");
+    switchTrack.className = "config-switch-track";
+    switchShell.appendChild(switchTrack);
+
+    item.append(info, switchShell);
+    audioConfigToggleList.appendChild(item);
+  });
+}
+
+async function loadAudioMonitorConfig() {
+  setAudioConfigStatus("正在从远端读取语音监控配置...");
+  const data = await request("/api/config/audio-monitor");
+  audioMonitorState.entries = Array.isArray(data.entries)
+    ? data.entries.map((entry) => ({
+      module: String(entry?.module || "").trim(),
+      enable: Boolean(entry?.enable),
+      audio_error_path: String(entry?.audio_error_path || "").trim(),
+      audio_normal_path: String(entry?.audio_normal_path || "").trim(),
+      topic: String(entry?.topic || "").trim(),
+    }))
+    : [];
+  audioMonitorState.hasLoaded = true;
+  renderAudioMonitorConfig();
+  setAudioConfigStatus(`已加载 ${audioMonitorState.entries.length} 个语音监控模块。`);
+}
+
+async function ensureAudioMonitorConfigLoaded() {
+  if (audioMonitorState.hasLoaded) {
+    return;
+  }
+  try {
+    await loadAudioMonitorConfig();
+  } catch (error) {
+    setAudioConfigStatus(`加载语音监控配置失败：${error.message}`, true);
+    appendLog("加载语音监控配置失败", error.message);
+  }
+}
+
+async function saveAudioMonitorConfig() {
+  if (!audioMonitorState.entries.length) {
+    throw new Error("当前没有可保存的语音监控配置");
+  }
+  audioMonitorState.isSaving = true;
+  renderAudioMonitorConfig();
+  setAudioConfigStatus("正在保存远端语音监控配置并执行重载...");
+  try {
+    const data = await request("/api/config/audio-monitor", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        entries: audioMonitorState.entries.map((entry) => ({
+          module: entry.module,
+          enable: Boolean(entry.enable),
+        })),
+      }),
+    });
+    audioMonitorState.entries = Array.isArray(data.entries)
+      ? data.entries.map((entry) => ({
+        module: String(entry?.module || "").trim(),
+        enable: Boolean(entry?.enable),
+        audio_error_path: String(entry?.audio_error_path || "").trim(),
+        audio_normal_path: String(entry?.audio_normal_path || "").trim(),
+        topic: String(entry?.topic || "").trim(),
+      }))
+      : audioMonitorState.entries;
+    renderAudioMonitorConfig();
+    setAudioConfigStatus(data.reload_output ? `保存成功，重载结果：${data.reload_output}` : "保存成功，配置已重载。");
+    appendLog("语音监控配置已保存", data.reload_output || String(data.remote_path || ""));
+  } catch (error) {
+    audioMonitorState.hasLoaded = false;
+    try {
+      await loadAudioMonitorConfig();
+    } catch (reloadError) {
+      appendLog("保存失败后刷新语音监控配置失败", reloadError.message);
+    }
+    throw error;
+  } finally {
+    audioMonitorState.isSaving = false;
+    renderAudioMonitorConfig();
+  }
+}
+
+function switchRosSection(pageName = "topic") {
+  const requestedPage = String(pageName || "topic").trim() || "topic";
+  const normalizedPage = rosPanels.some((panel) => panel.dataset.rosPanel === requestedPage) ? requestedPage : "topic";
+  rosState.activeSection = normalizedPage;
+  rosNavButtons.forEach((button) => {
+    const isActive = button.dataset.rosTarget === normalizedPage;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+  rosPanels.forEach((panel) => {
+    const isActive = panel.dataset.rosPanel === normalizedPage;
     panel.classList.toggle("is-active", isActive);
     panel.hidden = !isActive;
   });
@@ -363,7 +557,7 @@ async function loadAutoDeployConfigs() {
     return;
   }
   try {
-    const response = await fetch(`/static/auto_deploy.json?v=${Date.now()}`, { cache: "no-store" });
+    const response = await fetch(`/static/page_configs/deploy.auto.json?v=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -394,7 +588,7 @@ function normalizeRosFilterPrefixes(items = []) {
 
 async function loadRosFilterConfig() {
   try {
-    const response = await fetch(`/static/ros_filters.json?v=${Date.now()}`, { cache: "no-store" });
+    const response = await fetch(`/static/page_configs/ros.filters.json?v=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -487,7 +681,7 @@ async function loadFeishuDocs() {
     return;
   }
   try {
-    const response = await fetch(`/static/feishu_docs.json?v=${Date.now()}`, { cache: "no-store" });
+    const response = await fetch(`/static/page_configs/feishu-doc.json?v=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -1336,6 +1530,7 @@ async function loadSelectedTopicSummary(topicName) {
     rosState.selectedTopicDefinition = "";
     rosState.selectedTopicDirection = "";
     rosState.topicAvailable = false;
+    setRosOutput(rosTopicDefinitionOutput, "选择 Topic 后，这里会显示对应的 msg 定义。");
     updateRosTopicSummary();
     renderRosNameList("topic");
     return;
@@ -1361,13 +1556,18 @@ async function loadSelectedTopicSummary(topicName) {
       try {
         const definitionData = await request(`/api/ros/message-definition?type_name=${encodeURIComponent(rosState.selectedTopicType)}`);
         rosState.selectedTopicDefinition = String(definitionData.output || "");
-        rosTopicPubMessageInput.value = buildRosTemplateFromDefinition(definitionData.output || "");
+        setRosOutput(rosTopicDefinitionOutput, rosState.selectedTopicDefinition || "未获取到消息定义");
+        rosTopicPubMessageInput.value = buildRosTemplateFromDefinition(definitionData.template_output || definitionData.output || "");
       } catch (definitionError) {
+        setRosOutput(rosTopicDefinitionOutput, `加载消息定义失败：${definitionError.message}`);
         appendLog("加载 Topic 消息模板失败", definitionError.message);
       }
+    } else {
+      setRosOutput(rosTopicDefinitionOutput, "当前 Topic 没有可用的消息类型。");
     }
     setRosOutput(rosTopicDetailOutput, infoData.output || "命令无输出");
   } catch (error) {
+    setRosOutput(rosTopicDefinitionOutput, `Topic 定义加载失败：${error.message}`);
     setRosOutput(rosTopicDetailOutput, `Topic 摘要加载失败：${error.message}`);
   } finally {
     updateRosTopicSummary();
@@ -1427,18 +1627,27 @@ function renderRosNameList(kind) {
         if (rosSelectedServiceName) {
           rosSelectedServiceName.textContent = name;
         }
+        if (rosSelectedServiceType) {
+          rosSelectedServiceType.textContent = "-";
+        }
+        setRosOutput(rosServiceDefinitionOutput, `已选中 Service：${name}\n正在加载 srv 定义...`);
         setRosOutput(rosServiceDetailOutput, `已选中 Service：${name}\n正在准备 call 模板...`);
         request(`/api/ros/service-definition?name=${encodeURIComponent(name)}`)
           .then((data) => {
             rosState.selectedServiceType = String(data.type_name || "").trim();
             rosState.selectedServiceDefinition = String(data.output || "");
+            if (rosSelectedServiceType) {
+              rosSelectedServiceType.textContent = rosState.selectedServiceType || "-";
+            }
+            setRosOutput(rosServiceDefinitionOutput, rosState.selectedServiceDefinition || "未获取到服务定义");
             if (rosServiceCallRequestInput) {
-              rosServiceCallRequestInput.value = buildRosTemplateFromDefinition(data.output || "", { requestOnly: true });
+              rosServiceCallRequestInput.value = buildRosTemplateFromDefinition(data.template_output || data.output || "", { requestOnly: true });
             }
             setRosOutput(rosServiceDetailOutput, `已选中 Service：${name}\n点击上方按钮查看 info / type 或执行 call。`);
           })
           .catch((error) => {
             appendLog("加载 Service 请求模板失败", error.message);
+            setRosOutput(rosServiceDefinitionOutput, `加载服务定义失败：${error.message}`);
             setRosOutput(rosServiceDetailOutput, `已选中 Service：${name}\n加载 call 模板失败：${error.message}`);
           });
       }
@@ -1463,9 +1672,14 @@ async function loadRosNames(kind, { silent = false } = {}) {
     rosState.hasLoadedTopics = true;
     if (!items.includes(rosState.selectedTopic)) {
       rosState.selectedTopic = "";
+      rosState.selectedTopicType = "";
+      rosState.selectedTopicDefinition = "";
+      rosState.selectedTopicDirection = "";
+      rosState.topicAvailable = false;
       if (rosSelectedTopicName) {
         rosSelectedTopicName.textContent = "未选择 Topic";
       }
+      setRosOutput(rosTopicDefinitionOutput, "选择 Topic 后，这里会显示对应的 msg 定义。");
     }
   } else {
     rosState.services = items;
@@ -1477,6 +1691,10 @@ async function loadRosNames(kind, { silent = false } = {}) {
       if (rosSelectedServiceName) {
         rosSelectedServiceName.textContent = "未选择 Service";
       }
+      if (rosSelectedServiceType) {
+        rosSelectedServiceType.textContent = "-";
+      }
+      setRosOutput(rosServiceDefinitionOutput, "选择 Service 后，这里会显示对应的 srv 定义。");
     }
   }
   renderRosNameList(kind);
@@ -1518,7 +1736,8 @@ function requireSelectedRosName(kind) {
 
 async function runRosTopicAction(action) {
   const topicName = requireSelectedRosName("topic");
-  setRosOutput(rosTopicDetailOutput, `正在执行 ${action}：${topicName}`);
+  const outputNode = action === "pub" ? rosTopicPublishOutput : rosTopicDetailOutput;
+  setRosOutput(outputNode, `正在执行 ${action}：${topicName}`);
   let data;
   if (action === "info") {
     data = await request(`/api/ros/topic-info?name=${encodeURIComponent(topicName)}`);
@@ -1550,7 +1769,7 @@ async function runRosTopicAction(action) {
   } else {
     throw new Error(`不支持的 Topic 动作: ${action}`);
   }
-  setRosOutput(rosTopicDetailOutput, data.output || "命令无输出");
+  setRosOutput(outputNode, data.output || "命令无输出");
   appendLog(`ROS Topic ${action}`, topicName);
 }
 
@@ -1835,35 +2054,6 @@ function setModuleDeployFile(file = null) {
   setModuleDeployFileMeta(file);
 }
 
-function setOfflineImageDeployFileMeta(file = null) {
-  if (!offlineImageDeployDropzone || !offlineImageDeployFileMeta) {
-    return;
-  }
-  if (!file) {
-    offlineImageDeployDropzone.classList.remove("has-file");
-    offlineImageDeployFileMeta.textContent = "当前未选择文件";
-    return;
-  }
-  offlineImageDeployDropzone.classList.add("has-file");
-  offlineImageDeployFileMeta.textContent = `${file.name} · ${formatBytes(file.size)}`;
-}
-
-function setOfflineImageDeployFile(file = null) {
-  if (!offlineImageDeployFileInput) {
-    return;
-  }
-  if (!file) {
-    offlineImageDeployFileInput.value = "";
-    setOfflineImageDeployFileMeta(null);
-    return;
-  }
-
-  const transfer = new DataTransfer();
-  transfer.items.add(file);
-  offlineImageDeployFileInput.files = transfer.files;
-  setOfflineImageDeployFileMeta(file);
-}
-
 function createUploadProgressView(id) {
   const root = document.getElementById(id);
   if (!root) {
@@ -1895,7 +2085,7 @@ function createDeployFlowView(id) {
 }
 
 function deployActionLabel(deployMode = "package") {
-  return deployMode === "offline_image" ? "导入" : "安装";
+  return "安装";
 }
 
 function deployFileNoun(deployMode = "package") {
@@ -1905,7 +2095,7 @@ function deployFileNoun(deployMode = "package") {
   if (deployMode === "module") {
     return "模块 deb 文件";
   }
-  return "离线镜像文件";
+  return "部署文件";
 }
 
 function setDeployFlowStepState(step, state = "pending") {
@@ -1949,44 +2139,6 @@ function findCurrentDeployTask(tasks = [], deployMode) {
 }
 
 function deriveDeployFlow(task = null, progress = null, deployMode = "package") {
-  if (deployMode === "offline_image") {
-    const stepStates = {
-      uploading: "pending",
-      installing: "pending",
-      succeeded: "pending",
-      failed: "pending",
-    };
-    const taskStatus = String(task && task.status ? task.status : "");
-    const progressPhase = String(progress && progress.phase ? progress.phase : "");
-
-    if (progressPhase === "failed" || taskStatus === "failed") {
-      if (progressPhase === "uploading_to_robot") {
-        stepStates.uploading = "error";
-      } else {
-        stepStates.uploading = "done";
-        stepStates.installing = "error";
-      }
-      stepStates.failed = "error";
-      return { summary: "安装失败", stepStates };
-    }
-    if (taskStatus === "succeeded" || taskStatus === "warning") {
-      stepStates.uploading = "done";
-      stepStates.installing = "done";
-      stepStates.succeeded = "done";
-      return { summary: taskStatus === "warning" ? "安装成功（有告警）" : "安装成功", stepStates };
-    }
-    if (progressPhase === "installing") {
-      stepStates.uploading = "done";
-      stepStates.installing = "active";
-      return { summary: "安装中", stepStates };
-    }
-    if (taskStatus === "running" || taskStatus === "pending" || progress) {
-      stepStates.uploading = "active";
-      return { summary: "上传中", stepStates };
-    }
-    return { summary: "等待开始", stepStates };
-  }
-
   const actionLabel = deployActionLabel(deployMode);
   const stepStates = {
     uploading: "pending",
@@ -2129,11 +2281,9 @@ Object.values(uploadProgressViews)
   });
 renderDeployFlow(deployFlowViews.package, deriveDeployFlow(null, null, "package"));
 renderDeployFlow(deployFlowViews.module, deriveDeployFlow(null, null, "module"));
-renderDeployFlow(deployFlowViews.offline_image, deriveDeployFlow(null, null, "offline_image"));
 setPackageDeployFileMeta(packageDeployFileInput && packageDeployFileInput.files ? packageDeployFileInput.files[0] : null);
 resetPackageDeployStage({ keepHint: true });
 setModuleDeployFileMeta(moduleDeployFileInput && moduleDeployFileInput.files ? moduleDeployFileInput.files[0] : null);
-setOfflineImageDeployFileMeta(offlineImageDeployFileInput && offlineImageDeployFileInput.files ? offlineImageDeployFileInput.files[0] : null);
 
 if (packageDeployDropzone && packageDeployFileInput) {
   packageDeployDropzone.addEventListener("click", () => {
@@ -2256,48 +2406,6 @@ if (moduleDeployDropzone && moduleDeployFileInput) {
     }
     setModuleDeployFile(selectedFile);
     appendLog("已拖入模块部署文件", selectedFile.name);
-  });
-}
-
-if (offlineImageDeployDropzone && offlineImageDeployFileInput) {
-  offlineImageDeployDropzone.addEventListener("click", () => {
-    offlineImageDeployFileInput.click();
-  });
-
-  offlineImageDeployDropzone.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      offlineImageDeployFileInput.click();
-    }
-  });
-
-  offlineImageDeployFileInput.addEventListener("change", () => {
-    setOfflineImageDeployFileMeta(offlineImageDeployFileInput.files && offlineImageDeployFileInput.files[0] ? offlineImageDeployFileInput.files[0] : null);
-  });
-
-  ["dragenter", "dragover"].forEach((eventName) => {
-    offlineImageDeployDropzone.addEventListener(eventName, (event) => {
-      event.preventDefault();
-      offlineImageDeployDropzone.classList.add("is-dragover");
-    });
-  });
-
-  ["dragleave", "dragend"].forEach((eventName) => {
-    offlineImageDeployDropzone.addEventListener(eventName, () => {
-      offlineImageDeployDropzone.classList.remove("is-dragover");
-    });
-  });
-
-  offlineImageDeployDropzone.addEventListener("drop", (event) => {
-    event.preventDefault();
-    offlineImageDeployDropzone.classList.remove("is-dragover");
-    const droppedFiles = event.dataTransfer && event.dataTransfer.files ? Array.from(event.dataTransfer.files) : [];
-    const selectedFile = droppedFiles.find((file) => file && file.name);
-    if (!selectedFile) {
-      return;
-    }
-    setOfflineImageDeployFile(selectedFile);
-    appendLog("已拖入离线镜像文件", selectedFile.name);
   });
 }
 
@@ -2433,8 +2541,6 @@ function syncDeployFlowForUploadView(view, progress) {
     syncDeployFlow("package", { progress });
   } else if (view === uploadProgressViews.moduleDeploy) {
     syncDeployFlow("module", { progress });
-  } else if (view === uploadProgressViews.offlineImageDeploy) {
-    syncDeployFlow("offline_image", { progress });
   }
 }
 
@@ -2592,7 +2698,7 @@ async function waitForTaskCompletion(taskId, { pollMs = 1500 } = {}) {
     renderTaskDetail(task);
     if (task.type === "deployment") {
       const deployMode = String(task?.metadata?.deploy_mode || "").trim();
-      if (deployMode === "package" || deployMode === "module" || deployMode === "offline_image") {
+      if (deployMode === "package" || deployMode === "module") {
         syncDeployFlow(deployMode, { task });
       }
     }
@@ -2661,7 +2767,7 @@ async function resolveDeployConflict(
     file_name: selectedFileName,
     machine_type: String(formData.get("machine_type") || "").trim(),
   });
-  if (deployMode === "package" || deployMode === "offline_image") {
+  if (deployMode === "package") {
     params.set("device_type", String(formData.get("device_type") || "ORIN").trim() || "ORIN");
   }
   const target = await request(`/api/deploy-target?${params.toString()}`);
@@ -2977,6 +3083,22 @@ async function copyText(text) {
   }
 }
 
+async function copyRosExample(button, outputNode, successMessage) {
+  const text = String(outputNode?.textContent || "").trim();
+  if (!text) {
+    throw new Error("当前没有可复制的示例内容");
+  }
+  const originalText = button?.textContent || "复制示例";
+  await copyText(text);
+  if (button) {
+    button.textContent = "已复制";
+    window.setTimeout(() => {
+      button.textContent = originalText;
+    }, 1600);
+  }
+  appendLog(successMessage);
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -3036,7 +3158,6 @@ async function refreshDashboard() {
     renderTasks(taskData.tasks);
     syncDeployFlow("package", { tasks: taskData.tasks });
     syncDeployFlow("module", { tasks: taskData.tasks });
-    syncDeployFlow("offline_image", { tasks: taskData.tasks });
     await refreshTaskDetail();
     dashboardErrorShown = false;
   } catch (error) {
@@ -3183,7 +3304,7 @@ if (rosTopicPubBtn) {
     try {
       await runRosTopicAction("pub");
     } catch (error) {
-      setRosOutput(rosTopicDetailOutput, error.message);
+      setRosOutput(rosTopicPublishOutput, error.message);
       appendLog("rostopic pub 失败", error.message);
     }
   });
@@ -3192,10 +3313,21 @@ if (rosTopicPubBtn) {
 if (rosTopicPubPythonBtn) {
   rosTopicPubPythonBtn.addEventListener("click", () => {
     try {
-      setRosOutput(rosTopicDetailOutput, buildRosTopicPythonExample("publish"));
+      setRosOutput(rosTopicPublishOutput, buildRosTopicPythonExample("publish"));
     } catch (error) {
-      setRosOutput(rosTopicDetailOutput, error.message);
+      setRosOutput(rosTopicPublishOutput, error.message);
       appendLog("生成 Topic Python 发布示例失败", error.message);
+    }
+  });
+}
+
+if (rosTopicPubPythonCopyBtn) {
+  rosTopicPubPythonCopyBtn.addEventListener("click", async () => {
+    try {
+      await copyRosExample(rosTopicPubPythonCopyBtn, rosTopicPublishOutput, "已复制 Topic Python 发布示例");
+    } catch (error) {
+      appendLog("复制 Topic Python 发布示例失败", error.message);
+      alert(error.message);
     }
   });
 }
@@ -3233,6 +3365,17 @@ if (rosTopicSubPythonBtn) {
   });
 }
 
+if (rosTopicSubPythonCopyBtn) {
+  rosTopicSubPythonCopyBtn.addEventListener("click", async () => {
+    try {
+      await copyRosExample(rosTopicSubPythonCopyBtn, rosTopicDetailOutput, "已复制 Topic Python 订阅示例");
+    } catch (error) {
+      appendLog("复制 Topic Python 订阅示例失败", error.message);
+      alert(error.message);
+    }
+  });
+}
+
 if (rosServiceCallBtn) {
   rosServiceCallBtn.addEventListener("click", async () => {
     try {
@@ -3255,9 +3398,68 @@ if (rosServicePythonBtn) {
   });
 }
 
+if (rosServicePythonCopyBtn) {
+  rosServicePythonCopyBtn.addEventListener("click", async () => {
+    try {
+      await copyRosExample(rosServicePythonCopyBtn, rosServiceDetailOutput, "已复制 Service Python 调用示例");
+    } catch (error) {
+      appendLog("复制 Service Python 调用示例失败", error.message);
+      alert(error.message);
+    }
+  });
+}
+
 guideNavButtons.forEach((button) => {
   button.addEventListener("click", () => {
     switchGuidePage(button.dataset.guideTarget || "flow");
+  });
+});
+
+configNavButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    switchConfigPage(button.dataset.configTarget || "voice");
+  });
+});
+
+if (refreshAudioConfigBtn) {
+  refreshAudioConfigBtn.addEventListener("click", async () => {
+    try {
+      audioMonitorState.hasLoaded = false;
+      await loadAudioMonitorConfig();
+    } catch (error) {
+      setAudioConfigStatus(`刷新语音监控配置失败：${error.message}`, true);
+      appendLog("刷新语音监控配置失败", error.message);
+    }
+  });
+}
+
+if (enableAllAudioConfigBtn) {
+  enableAllAudioConfigBtn.addEventListener("click", () => {
+    setAllAudioMonitorEntries(true);
+  });
+}
+
+if (disableAllAudioConfigBtn) {
+  disableAllAudioConfigBtn.addEventListener("click", () => {
+    setAllAudioMonitorEntries(false);
+  });
+}
+
+if (saveAudioConfigBtn) {
+  saveAudioConfigBtn.addEventListener("click", async () => {
+    try {
+      await saveAudioMonitorConfig();
+    } catch (error) {
+      setAudioConfigStatus(`保存语音监控配置失败：${error.message}`, true);
+      appendLog("保存语音监控配置失败", error.message);
+      alert(error.message);
+    }
+  });
+}
+
+rosNavButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    switchRosSection(button.dataset.rosTarget || "topic");
   });
 });
 
@@ -3738,87 +3940,6 @@ if (moduleDeployForm) {
   });
 }
 
-async function submitOfflineImageDeployForm(event) {
-  event.preventDefault();
-  const formData = new FormData(event.currentTarget);
-  const deviceType = String(formData.get("device_type") || "ORIN").trim().toUpperCase() || "ORIN";
-  formData.set("device_type", deviceType);
-  const selectedFile = formData.get("image_file");
-  const serverFilePath = String(formData.get("server_file_path") || "").trim();
-  if (!(selectedFile instanceof File) || !selectedFile.name) {
-    if (!extractFileNameFromServerPath(serverFilePath)) {
-      throw new Error("请选择离线镜像文件或填写文件服务器包路径");
-    }
-  }
-
-  const conflictResolution = await resolveDeployConflict(formData, "offline_image", uploadProgressViews.offlineImageDeploy, {
-    fileFieldName: "image_file",
-  });
-  if (conflictResolution.cancelled) {
-    return;
-  }
-
-  currentDeployTaskIds.offline_image = "";
-  syncDeployFlow("offline_image", {
-    task: {
-      id: "",
-      type: "deployment",
-      status: conflictResolution.skipBrowserUpload ? "pending" : "running",
-      metadata: {
-        deploy_mode: "offline_image",
-        used_existing_remote: conflictResolution.skipBrowserUpload,
-      },
-      result: {},
-      error: "",
-    },
-    progress: conflictResolution.skipBrowserUpload ? { phase: "completed", done: true } : { phase: "preparing", done: false },
-  });
-
-  let data;
-  try {
-    data = await submitUploadWithProgress("/api/deploy-offline-image", formData, uploadProgressViews.offlineImageDeploy, "offline-image-deploy", {
-      skipBrowserUpload: conflictResolution.skipBrowserUpload,
-      reuseRemoteText: "准备直接导入远端镜像文件",
-      browserCompleteText: "浏览器上传已完成，等待后台上传到目标处理器",
-      remoteReuseProgressText: "已复用远端镜像文件，正在进入 docker load 流程",
-    });
-  } catch (error) {
-    const retryResolution = await resolveDeployConflictFromError(formData, uploadProgressViews.offlineImageDeploy, error, {
-      fileFieldName: "image_file",
-      deployMode: "offline_image",
-    });
-    if (!retryResolution.handled) {
-      throw error;
-    }
-    if (retryResolution.cancelled) {
-      return;
-    }
-    data = await submitUploadWithProgress("/api/deploy-offline-image", formData, uploadProgressViews.offlineImageDeploy, "offline-image-deploy", {
-      skipBrowserUpload: retryResolution.skipBrowserUpload,
-      reuseRemoteText: "准备直接导入远端镜像文件",
-      browserCompleteText: "浏览器上传已完成，等待后台上传到目标处理器",
-      remoteReuseProgressText: "已复用远端镜像文件，正在进入 docker load 流程",
-    });
-  }
-
-  selectedTaskId = data.task.id;
-  currentDeployTaskIds.offline_image = data.task.id;
-  syncDeployFlow("offline_image", { task: data.task });
-  appendLog("离线镜像部署任务已创建", `${data.task.title} (${data.task.id})`);
-  await refreshDashboard();
-}
-
-if (offlineImageDeployForm) {
-  offlineImageDeployForm.addEventListener("submit", async (event) => {
-    try {
-      await submitOfflineImageDeployForm(event);
-    } catch (error) {
-      appendLog("创建离线镜像部署任务失败", error.message);
-      alert(error.message);
-    }
-  });
-}
-
 remoteDirLoadButtons.forEach((button) => {
   button.addEventListener("click", async () => {
     const targetSelectId = button.dataset.targetSelect;
@@ -3836,6 +3957,8 @@ window.addEventListener("load", async () => {
     const initialPage = String(window.location.hash || "").replace(/^#/, "").trim() || "remote";
     switchPage(initialPage);
     switchGuidePage("flow");
+    switchConfigPage("voice");
+    switchRosSection("topic");
     switchRosTab("publish");
     updateRosTopicSummary();
     updateRosPublishHistory();

@@ -1,0 +1,6 @@
+{
+  "device_roots": {
+    "ORIN": "/home/naviai/navi_project/logs",
+    "PICO": "/home/naviai/navi_project/logs"
+  }
+}

@@ -1267,6 +1267,13 @@ body {
   gap: 12px;
 }
 
+.config-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 4px;
+}
+
 .guide-subnav-item {
   min-height: 46px;
   padding: 0 18px;
@@ -1294,11 +1301,58 @@ body {
     0 12px 24px rgba(21, 138, 99, 0.06);
 }
 
+.config-subnav-item {
+  min-height: 46px;
+  padding: 0 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(210, 222, 233, 0.96);
+  background: rgba(255, 255, 255, 0.92);
+  color: #475467;
+  font-weight: 700;
+  box-shadow: 0 10px 20px rgba(34, 43, 58, 0.03);
+}
+
+.config-subnav-item:hover,
+.config-subnav-item:focus-visible {
+  background: rgba(246, 251, 248, 0.98);
+  border-color: rgba(31, 140, 103, 0.22);
+  outline: none;
+}
+
+.config-subnav-item.is-active {
+  background: linear-gradient(135deg, rgba(237, 248, 244, 0.98), rgba(245, 251, 248, 0.94));
+  border-color: rgba(189, 225, 210, 0.9);
+  color: #1b8a66;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 12px 24px rgba(21, 138, 99, 0.06);
+}
+
 .guide-subpages {
   display: grid;
 }
 
 .guide-subpage[hidden] {
+  display: none;
+}
+
+.config-subpages {
+  display: grid;
+}
+
+.config-subpage[hidden] {
+  display: none;
+}
+
+.ros-subnav {
+  margin: 12px 0 18px;
+}
+
+.ros-subpages {
+  display: grid;
+}
+
+.ros-subpage[hidden] {
   display: none;
 }
 
@@ -1421,6 +1475,237 @@ body {
 
 .guide-doc-link-primary {
   padding: 20px 20px 18px;
+}
+
+.config-page-panel {
+  display: grid;
+  gap: 30px;
+}
+
+.config-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 28px;
+  padding: 28px 30px;
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at right top, rgba(17, 94, 89, 0.14), transparent 34%),
+    linear-gradient(135deg, rgba(247, 251, 255, 0.98), rgba(241, 247, 252, 0.92));
+  border: 1px solid rgba(193, 219, 232, 0.88);
+}
+
+.config-hero-copy {
+  display: grid;
+  gap: 12px;
+}
+
+.config-hero-copy strong {
+  font-size: 20px;
+  line-height: 1.35;
+}
+
+.config-hero-copy p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.config-hero-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 146px;
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: 999px;
+  background: rgba(15, 118, 110, 0.1);
+  color: var(--brand);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
+
+.config-card {
+  padding: 28px 30px 30px;
+  border-radius: 24px;
+  border: 1px solid rgba(228, 234, 242, 0.96);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(247, 251, 255, 0.92));
+  box-shadow: 0 14px 30px rgba(34, 43, 58, 0.04);
+}
+
+.config-card-head {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 22px;
+}
+
+.config-kicker {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(25, 104, 140, 0.72);
+  font-weight: 800;
+}
+
+.config-card-head h3 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.config-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.config-info-block {
+  padding: 22px 22px 20px;
+  border-radius: 18px;
+  background: rgba(245, 249, 252, 0.92);
+  border: 1px solid rgba(216, 226, 236, 0.92);
+}
+
+.config-info-block strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 16px;
+}
+
+.config-info-block p,
+.config-placeholder p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.config-placeholder {
+  margin-top: 28px;
+  padding: 22px 24px;
+  border-radius: 18px;
+  border: 1px dashed rgba(170, 188, 206, 0.96);
+  background: rgba(255, 255, 255, 0.66);
+}
+
+.config-placeholder strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 16px;
+  color: var(--ink);
+}
+
+.config-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 18px;
+  margin-bottom: 10px;
+}
+
+.config-toggle-list {
+  display: grid;
+  gap: 18px;
+  margin-top: 24px;
+}
+
+.config-toggle-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 24px;
+  align-items: center;
+  padding: 22px 24px;
+  border-radius: 18px;
+  border: 1px solid rgba(218, 226, 238, 0.92);
+  background: rgba(247, 249, 252, 0.8);
+}
+
+.config-toggle-copy {
+  min-width: 0;
+}
+
+.config-toggle-copy strong {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 17px;
+  color: var(--ink);
+}
+
+.config-toggle-meta {
+  color: var(--muted);
+  line-height: 1.7;
+  word-break: break-all;
+}
+
+#audioConfigStatus {
+  margin: 4px 0 0;
+  line-height: 1.75;
+}
+
+.config-switch {
+  position: relative;
+  display: inline-flex;
+  width: 58px;
+  height: 34px;
+}
+
+.config-switch input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  margin: 0;
+}
+
+.config-switch-track {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 999px;
+  background: rgba(196, 204, 216, 0.9);
+  transition: background 0.18s ease;
+}
+
+.config-switch-track::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 6px 16px rgba(41, 52, 68, 0.16);
+  transition: transform 0.18s ease;
+}
+
+.config-switch input:checked + .config-switch-track {
+  background: linear-gradient(135deg, #187f5d, #096746);
+}
+
+.config-switch input:checked + .config-switch-track::after {
+  transform: translateX(24px);
+}
+
+.config-switch input:disabled {
+  cursor: not-allowed;
+}
+
+@media (max-width: 760px) {
+  .config-page-panel {
+    gap: 24px;
+  }
+
+  .config-hero,
+  .config-card {
+    padding: 22px 20px;
+  }
+
+  .config-toggle-item {
+    grid-template-columns: 1fr;
+    justify-items: start;
+  }
 }
 
 .log-page-banner {
@@ -1563,6 +1848,14 @@ body {
   align-items: start;
 }
 
+.ros-layout-topic {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ros-layout-service {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .ros-card {
   display: grid;
   gap: 18px;
@@ -1576,22 +1869,22 @@ body {
 }
 
 .ros-topic-list-card {
-  min-height: 620px;
+  min-height: 460px;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
 }
 
 .ros-topic-detail-card {
-  min-height: 620px;
+  min-height: 460px;
   align-content: start;
 }
 
 .ros-service-list-card {
-  min-height: 620px;
+  min-height: 460px;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
 }
 
 .ros-service-detail-card {
-  min-height: 420px;
+  min-height: 320px;
   align-content: start;
 }
 
@@ -1859,6 +2152,30 @@ body {
 .ros-detail-output {
   min-height: 280px;
   margin: 0;
+}
+
+.ros-output-shell {
+  position: relative;
+}
+
+.ros-output-shell .ros-detail-output {
+  padding-top: 60px;
+}
+
+.ros-output-copy-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1;
+  min-height: 38px;
+  padding-inline: 14px;
+  border-radius: 12px;
+}
+
+.log-output.ros-definition-output {
+  background: rgba(255, 255, 255, 0.96);
+  color: #24324d;
+  border: 1px solid rgba(225, 232, 243, 0.92);
 }
 
 .ros-service-output {
