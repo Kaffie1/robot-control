@@ -29,12 +29,17 @@
 建议按下面的顺序排查：
 
 1. 先检查激光相关 topic 有没有数据，确认传感器链路和 ROS 发布是否正常
-2. 再检查系统里有没有设置 `D_floor` 地图，确认定位使用的地图配置是否正确
-3. 如果激光有数据，且 `D_floor` 也已经正确设置，但还是没有定位信息，就停止自动排查，直接找算法同事继续分析
+2. 再确认定位使用的目标地图叫什么名字；如果用户没提供地图名，先追问
+3. 再检查系统里的可用地图列表是否包含这个目标地图，确认定位使用的地图配置是否正确
+4. 如果激光有数据，且目标地图也已经正确设置，但还是没有定位信息，就停止自动排查，直接找算法同事继续分析
 
-这个案例对应的 playbook 位于 `config/fault_playbooks.yaml` 里的 `no-localization`。
+这个案例对应的 playbook 位于 `config/fault_playbooks/no-localization/playbook.yaml`。
 
-对应的执行思路可以理解成先查 `/livox/lidar`，再查 `/zj_humanoid/navigation/odom_info`，最后确认 `D_floor` 配置。
+对应的执行思路已经写成脚本化 playbook：先查 `/livox/lidar`，如果用户没提供地图名就先追问“请问定位的地图叫什么名字”，再通过 service 确认地图列表里有这个目标地图，然后执行 `/zj_humanoid/perception/reloc`，最后继续看 `/zj_humanoid/navigation/odom_info`。
+
+如果某一步本身又是另一个独立问题，就让脚本通过 `on_fail.action: call_playbook` 跳到对应的子 playbook，而不是把两个问题硬写进一条线里。
+
+如果要判断“是否已经真正恢复”，再看 `success_criteria`，例如先等待 30 秒，再连续 3 次确认 `/zj_humanoid/navigation/odom_info` 不再全 0。
 
 当激光和地图都正常，但仍然没有定位时，模型应输出 `final`，并用更适合现场阅读的布局收敛结论，而不是把工具返回结果原封不动贴出来。
 
@@ -61,13 +66,12 @@
 
 ## 可执行工具
 
-可执行工具由后端工具注册表提供，实际执行时会走当前已连接机器人的 SSH 远端命令。
+可执行工具由后端工具注册表提供，实际执行时会走当前已连接机器人的交互式 SSH 远端命令。
 当前聊天页会自动把工具列表放入上下文。
 
-如果要扩展工具能力，优先在 `backend/agent_tools.py` 里增加实际实现，再同步更新故障工具文档。
+如果要扩展工具能力，优先在 `backend/agent/tools/registry.py` 和 `backend/agent/tools/runtime.py` 里增加实际实现，再同步更新故障工具文档。
 
 ## 故障文档来源
 
-- `config/fault_prompt_template.yaml`
-- `config/fault_playbooks.yaml`
-- `config/fault_tools.yaml`
+- `config/fault_playbooks/<playbook_id>/playbook.yaml`
+- `config/fault_playbooks/<playbook_id>/rules.yaml`

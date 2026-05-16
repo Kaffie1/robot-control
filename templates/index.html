@@ -4,7 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>机器人控制台</title>
-    <link rel="stylesheet" href="/static/style.css?v={{ asset_version }}" />
+    <link rel="stylesheet" href="/static/css/common.css?v={{ asset_version }}" />
+    <link rel="stylesheet" href="/static/css/remote.css?v={{ asset_version }}" />
+    <link rel="stylesheet" href="/static/css/deploy.css?v={{ asset_version }}" />
+    <link rel="stylesheet" href="/static/css/logs.css?v={{ asset_version }}" />
+    <link rel="stylesheet" href="/static/css/ros.css?v={{ asset_version }}" />
+    <link rel="stylesheet" href="/static/css/chat.css?v={{ asset_version }}" />
+    <link rel="stylesheet" href="/static/css/guide.css?v={{ asset_version }}" />
+    <link rel="stylesheet" href="/static/css/feishu-doc.css?v={{ asset_version }}" />
   </head>
   <body>
     <div class="page-shell">
@@ -952,6 +959,15 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v={{ asset_version }}"></script>
+    <script defer src="/static/js/common.js?v={{ asset_version }}"></script>
+    <script defer src="/static/js/navigation.js?v={{ asset_version }}"></script>
+    <script defer src="/static/js/guide.js?v={{ asset_version }}"></script>
+    <script defer src="/static/js/chat.js?v={{ asset_version }}"></script>
+    <script defer src="/static/js/feishu-doc.js?v={{ asset_version }}"></script>
+    <script defer src="/static/js/logs.js?v={{ asset_version }}"></script>
+    <script defer src="/static/js/ros.js?v={{ asset_version }}"></script>
+    <script defer src="/static/js/deploy.js?v={{ asset_version }}"></script>
+    <script defer src="/static/js/remote.js?v={{ asset_version }}"></script>
+    <script defer src="/static/js/bootstrap.js?v={{ asset_version }}"></script>
   </body>
 </html>

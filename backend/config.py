@@ -35,20 +35,24 @@ OPENAI_CHAT_MODEL = str(os.getenv("OPENAI_CHAT_MODEL") or "gpt-4.1-mini").strip(
 OPENAI_CHAT_TEMPERATURE = float(str(os.getenv("OPENAI_CHAT_TEMPERATURE") or "0.2").strip() or "0.2")
 OPENAI_ENABLE_REASONING_SPLIT = str(os.getenv("OPENAI_ENABLE_REASONING_SPLIT") or "").strip().lower() in {"1", "true", "yes", "on"}
 OPENAI_THINK = str(os.getenv("OPENAI_THINK") or "").strip()
+DOCKER_COMPOSE_UP_WAIT_SECONDS = max(int(str(os.getenv("DOCKER_COMPOSE_UP_WAIT_SECONDS") or "10").strip() or "10"), 0)
 
 STATIC_DIR = BASE_DIR / "static"
 TEMPLATE_DIR = BASE_DIR / "templates"
+DOCS_DIR = BASE_DIR / "docs"
 FAULT_CONFIG_DIR = BASE_DIR / "config"
+FAULT_PLAYBOOKS_DIR = FAULT_CONFIG_DIR / "fault_playbooks"
+FAULT_RULES_TEMPLATE_PATH = FAULT_CONFIG_DIR / "fault_rules.yaml"
+FAULT_PLAYBOOK_RULES_FILENAME = "rules.yaml"
 LOCAL_MODULE_DIR = BASE_DIR / "module"
 DATA_DIR = BASE_DIR / "data"
 RUNTIME_DIR = BASE_DIR / ".runtime"
+CHAT_SESSION_DIR = RUNTIME_DIR / "chat_sessions"
 DB_PATH = DATA_DIR / "operations.db"
 CONNECTION_CACHE_PATH = DATA_DIR / "connection_cache.json"
 DEPLOY_CONFIG_PATH = STATIC_DIR / "page_configs" / "deploy.json"
-FAULT_PLAYBOOKS_PATH = FAULT_CONFIG_DIR / "fault_playbooks.yaml"
-FAULT_PROMPT_TEMPLATE_PATH = FAULT_CONFIG_DIR / "fault_prompt_template.yaml"
-FAULT_REPORT_TEMPLATE_PATH = FAULT_CONFIG_DIR / "fault_report_template.yaml"
-FAULT_TOOLS_PATH = FAULT_CONFIG_DIR / "fault_tools.yaml"
+FAULT_PLAYBOOKS_PATH = FAULT_PLAYBOOKS_DIR
+FAULT_DIAGNOSIS_DOC_PATH = DOCS_DIR / "fault_diagnosis.md"
 FAULT_TRACE_LOG_PATH = RUNTIME_DIR / "fault_diagnosis.log"
 SESSION_COOKIE = "robot_upgrade_sid"
 MAX_CONNECTION_CACHE_ITEMS = 8
@@ -144,6 +148,7 @@ DEFAULT_DEPLOY_CONFIG = {
     },
     "module": {
         "probe_command_template": "",
+        "up_wait_seconds": 10,
         "install_template": (
             'bash -ic "export COMPOSE_PROFILES={compose_profiles}; '
             'export DISPLAY=\\${DISPLAY:-127.0.0.1:99.0}; '

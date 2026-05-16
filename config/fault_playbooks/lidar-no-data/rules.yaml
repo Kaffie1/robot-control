@@ -1,0 +1,43 @@
+version: 1
+description: lidar no data rules
+
+rules:
+  rule_1:
+    # 通用规则 1：判断 ping 命令是否成功。
+    type: compare
+    field: result.exit_code
+    op: equals
+    cast: number
+    value: 0
+
+  rule_2:
+    # 通用规则 2：判断工具输出是否成功。
+    op: and
+    conditions:
+      - type: compare
+        field: output
+        op: not_empty
+      - type: compare
+        field: output
+        op: not_contains
+        value: ERROR
+      - type: compare
+        field: output
+        op: not_contains
+        value: failed
+      - type: compare
+        field: output
+        op: not_contains
+        value: exception
+
+  rule_3:
+    # 通用规则 3：判断点云里 point_num 是否大于 10000。
+    type: compare
+    field: output
+    extract:
+      type: regex
+      pattern: "point_num:\\s*(\\d+)"
+      group: 1
+    op: greater_than
+    cast: number
+    value: 10000

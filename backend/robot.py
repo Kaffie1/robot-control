@@ -144,34 +144,13 @@ class RobotClient:
                     self.home_dir = self.sftp.normalize(".")
             return self.sftp
 
-    def exec_command(self, command: str, *, timeout: float | None = None) -> dict[str, Any]:
-        with self.lock:
-            self.ensure_connected()
-            assert self.ssh is not None
-            _, stdout, stderr = self.ssh.exec_command(command, timeout=timeout)
-            exit_code = stdout.channel.recv_exit_status()
-            return {
-                "exit_code": exit_code,
-                "stdout": stdout.read().decode("utf-8", errors="replace"),
-                "stderr": stderr.read().decode("utf-8", errors="replace"),
-            }
-
-    def exec_sudo_command(self, command: str, password: str, *, timeout: float | None = None) -> dict[str, Any]:
-        with self.lock:
-            self.ensure_connected()
-            assert self.ssh is not None
-            wrapped = f"sudo -S -p '' bash -lc {shlex.quote(command)}"
-            stdin, stdout, stderr = self.ssh.exec_command(wrapped, timeout=timeout)
-            stdin.write(f"{password}\n")
-            stdin.flush()
-            exit_code = stdout.channel.recv_exit_status()
-            return {
-                "exit_code": exit_code,
-                "stdout": stdout.read().decode("utf-8", errors="replace"),
-                "stderr": stderr.read().decode("utf-8", errors="replace"),
-            }
-
-    def exec_interactive_command(self, command: str, *, timeout: float = 20.0) -> dict[str, Any]:
+    def _exec_shell_command(
+        self,
+        command: str,
+        *,
+        timeout: float | None = None,
+        input_text: str | None = None,
+    ) -> dict[str, Any]:
         with self.lock:
             self.ensure_connected()
             assert self.ssh is not None
@@ -197,13 +176,17 @@ class RobotClient:
 
             try:
                 drain_channel(0.4)
-                wrapped_command = (
-                    f"{command}\n"
-                    f"printf '\\n{marker}:%s\\n' $?\n"
-                )
-                channel.send(wrapped_command)
-                deadline = time.monotonic() + timeout
-                while time.monotonic() < deadline:
+                channel.send("stty -echo >/dev/null 2>&1 || true\n")
+                channel.send("export PS1='' PS2=''; unset PROMPT_COMMAND\n")
+                drain_channel(0.2)
+                payload_lines = [str(command or "").rstrip()]
+                normalized_input_text = str(input_text or "").rstrip("\n")
+                if normalized_input_text:
+                    payload_lines.append(normalized_input_text)
+                payload_lines.append(f"printf '\\n{marker}:%s\\n' $?")
+                channel.send("\n".join(payload_lines) + "\n")
+                deadline = time.monotonic() + timeout if timeout is not None else None
+                while True:
                     chunk = drain_channel(0.3)
                     if chunk:
                         output_chunks.append(chunk)
@@ -212,16 +195,27 @@ class RobotClient:
                         if marker_match:
                             exit_code = int(marker_match.group(1))
                             cleaned_output = marker_pattern.sub("", combined_output)
-                            cleaned_output = cleaned_output.replace(wrapped_command, "", 1).strip()
+                            cleaned_output = cleaned_output.strip()
                             return {
                                 "exit_code": exit_code,
                                 "stdout": cleaned_output,
                                 "stderr": "",
                             }
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise ApiError(f"交互式命令执行超时（>{float(timeout):.0f}s）: {command}")
                     time.sleep(0.05)
-                raise ApiError(f"交互式命令执行超时（>{timeout:.0f}s）")
             finally:
                 channel.close()
+
+    def exec_command(self, command: str, *, timeout: float | None = None) -> dict[str, Any]:
+        return self._exec_shell_command(command, timeout=timeout)
+
+    def exec_sudo_command(self, command: str, password: str, *, timeout: float | None = None) -> dict[str, Any]:
+        wrapped = f"sudo -S -p '' bash -lc {shlex.quote(command)}"
+        return self._exec_shell_command(wrapped, timeout=timeout, input_text=password)
+
+    def exec_interactive_command(self, command: str, *, timeout: float = 20.0) -> dict[str, Any]:
+        return self._exec_shell_command(command, timeout=timeout)
 
     def exec_compose_service_command(self, project_root: str, service_name: str, command: str, *, timeout: float = 20.0) -> dict[str, Any]:
         normalized_project_root = str(project_root or "").strip()
@@ -233,23 +227,15 @@ class RobotClient:
             raise ApiError("docker compose 服务名不能为空")
         if not normalized_command:
             raise ApiError("容器命令不能为空")
-        setup_script = (
-            "for file in "
-            "/opt/ros/noetic/setup.bash "
-            "/opt/ros/humble/setup.bash "
-            "/workspace/devel/setup.bash "
-            "/workspace/install/setup.bash "
-            "/root/catkin_ws/devel/setup.bash "
-            "/catkin_ws/devel/setup.bash "
-            "/app/catkin_ws/devel/setup.bash; "
-            "do if [ -f \"$file\" ]; then . \"$file\" >/dev/null 2>&1; fi; done"
-        )
+        # rosbridge 这里优先使用已验证存在的 ROS Noetic 环境，避免循环 source 多份环境拖慢并引入不稳定因素。
+        setup_script = "if [ -f /opt/ros/noetic/setup.bash ]; then . /opt/ros/noetic/setup.bash >/dev/null 2>&1; fi"
         wrapped_command = (
             f"cd {shlex.quote(normalized_project_root)} && "
             f"docker compose exec -T {shlex.quote(normalized_service_name)} "
-            f"bash -lc {shlex.quote(f'{setup_script}; {normalized_command}')}"
+            f"bash -lc {shlex.quote(f'{setup_script}; {normalized_command}')} "
+            "</dev/null"
         )
-        return self.exec_command(wrapped_command, timeout=timeout + 5.0)
+        return self.exec_interactive_command(wrapped_command, timeout=timeout + 5.0)
 
     def get_interactive_env(self, name: str, *, timeout: float = 10.0) -> str:
         variable_name = str(name or "").strip()
@@ -257,7 +243,8 @@ class RobotClient:
             raise ApiError("环境变量名不能为空")
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable_name):
             raise ApiError(f"非法环境变量名: {variable_name}")
-        result = self.exec_command(f"bash -ic 'printf %s \"${variable_name}\"'")
+        # 读取交互式 shell 环境变量，确保和容器/登录 shell 的实际行为一致。
+        result = self.exec_interactive_command(f"bash -ic 'printf %s \"${variable_name}\"'", timeout=timeout)
         if int(result.get("exit_code", 0) or 0) != 0:
             raise ApiError(f"读取环境变量失败: {variable_name}")
         return str(result.get("stdout") or "").strip()

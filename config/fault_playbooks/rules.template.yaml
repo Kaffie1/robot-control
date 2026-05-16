@@ -1,0 +1,188 @@
+#
+# Rules Template
+# --------------
+# 这是标准规则模板，只用于新增 playbook 的规则参考。
+# 真正生效的规则应该放在：
+#   config/fault_playbooks/<playbook_id>/rules.yaml
+#
+# 规则引擎统一使用 `type: compare`。
+# `op` 必须写全称，不使用缩写。
+# `extract` 只负责从文本里先提取一个值，再进入比较逻辑。
+#
+# 字段总览：
+# - version：
+#   - 规则模板版本，通常保持 1
+# - description：
+#   - 这份规则文件的说明
+# - rules：
+#   - 规则集合，键名就是通用规则 id，建议使用 `rule_1`、`rule_2` 这类编号
+#   - 不建议把业务语义写进规则 id
+#
+# compare 规则字段说明：
+# - type：
+#   - 固定写 `compare`
+# - field：
+#   - 要读取的字段，支持 JSON path，例如 `result.exit_code`、`output`
+#   - 特殊写法 `.` 表示整个 payload 本身
+# - op：
+#   - 比较方式，必须从下面这些全称中选一个
+# - value：
+#   - 比较目标值，常用于数值、字符串、列表比较
+#   - 如果目标值来自上下文，推荐使用：
+#     - `value:`
+#       `  from_context: <context field name>`
+#     - 或 `value: "{{ context_field_name }}"`
+# - value_field：
+#   - 另一个字段路径，用它的值作为比较目标
+#   - 适合做“字段和字段比较”
+# - cast：
+#   - 类型转换方式，用来把实际值和目标值转成同一种类型后再比较
+# - extract：
+#   - 从文本中先提取一个值，再继续比较
+# - conditions：
+#   - 组合规则的条件列表，用于 `and` / `or`
+#
+# 推荐写法：
+#   rules:
+#     rule_1:
+#       type: compare
+#       field: output
+#       op: not_empty
+#       cast: string
+#
+# op 可选值及含义：
+# - equals：
+#   - 实际值与目标值完全相等
+# - not_equals：
+#   - 实际值与目标值不相等
+# - greater_than：
+#   - 实际值大于目标值
+# - greater_or_equal：
+#   - 实际值大于等于目标值
+# - less_than：
+#   - 实际值小于目标值
+# - less_or_equal：
+#   - 实际值小于等于目标值
+# - contains：
+#   - 实际值包含目标值，通常用于字符串
+# - not_contains：
+#   - 实际值不包含目标值，通常用于字符串
+# - regex_match：
+#   - 实际值满足正则表达式
+# - list_contains：
+#   - 实际值是列表，且列表中包含目标值
+# - exists：
+#   - 字段存在
+# - not_exists：
+#   - 字段不存在
+# - empty：
+#   - 字段为空
+# - not_empty：
+#   - 字段非空
+# - between：
+#   - 实际值在范围内，需要配合 `min` 和 `max`
+# - boolean_true：
+#   - 实际值为真
+# - boolean_false：
+#   - 实际值为假
+# - timestamp_recent：
+#   - 时间在指定秒数内，需要配合 `within_seconds`
+# - length_gt：
+#   - 长度大于指定值，需要配合 `value`
+#
+# cast 可选值及含义：
+# - number：
+#   - 转成数字后再比较
+# - boolean：
+#   - 转成布尔值后再比较
+# - timestamp：
+#   - 转成时间戳后再比较
+# - string：
+#   - 转成字符串后再比较
+#
+# extract.type 可选值及含义：
+# - regex：
+#   - 用正则提取文本中的内容，目前唯一支持的提取方式
+# - extract.group：
+#   - 取第几个分组，默认 1
+# - extract.ignore_case：
+#   - 是否忽略大小写，写 `true` 时按不区分大小写处理
+#
+# 专用字段说明：
+# - min：
+#   - `between` 的下界
+# - max：
+#   - `between` 的上界
+# - within_seconds：
+#   - `timestamp_recent` 的时间窗口，单位秒
+#
+# 兼容写法说明：
+# - fields_equal / equal_fields：
+#   - 旧的字段对字段比较写法
+#   - 新模板不推荐使用，建议直接用 `value_field + equals`
+# - expect：
+#   - 旧字段名，等价于 `assert_ref`，只在 playbook 里使用
+#
+version: 1
+description: <rules description>
+
+rules:
+  <rule_id>:
+    # 单条件规则直接写 compare
+    type: compare
+
+    # 要判断的字段，支持 JSON path
+    field: <json.path>
+
+    # 比较运算符，支持：
+    # equals / not_equals / greater_than / greater_or_equal / less_than / less_or_equal
+    # contains / not_contains / regex_match / list_contains
+    # exists / not_exists / empty / not_empty
+    # between / boolean_true / boolean_false / timestamp_recent / length_gt
+    op: <compare operator>
+
+    # 比较目标值
+    value: <compare value>
+    # 如果比较目标值来自上下文，也可以写成：
+    # value:
+    #   from_context: <context field name>
+    # 或：
+    # value: "{{ context_field_name }}"
+
+    # 另一个字段的值作为比较目标
+    value_field: <json.path>
+
+    # 类型转换
+    # number / boolean / timestamp / string
+    cast: <number|boolean|timestamp|string>
+
+    # 文本提取
+    # 适合从日志、stdout 这类纯文本里先抓出一个值
+    extract:
+      type: regex
+      pattern: "<regex>"
+      group: 1
+      ignore_case: true
+
+    # 组合规则时使用
+    # op: and / or
+    # conditions:
+    #   - type: compare
+    #     field: output
+    #     op: not_empty
+    #   - type: compare
+    #     field: output
+    #     op: not_contains
+    #     value: ERROR
+
+  <another_rule_id>:
+    # 组合规则示例
+    op: and
+    conditions:
+      - type: compare
+        field: output
+        op: not_empty
+      - type: compare
+        field: output
+        op: not_contains
+        value: ERROR

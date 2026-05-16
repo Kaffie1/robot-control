@@ -59,6 +59,7 @@
   },
   "module": {
     "probe_command_template": "",
+    "up_wait_seconds": 10,
     "install_template": "bash -ic \"export COMPOSE_PROFILES={compose_profiles}; export DISPLAY=\\${DISPLAY:-127.0.0.1:99.0}; export ROBOT_MODEL=\\$COMPOSE_PROFILES; if [ \\\"\\$COMPOSE_PROFILES\\\" = \\\"rx\\\" ]; then export ROS_MASTER_URI=http://192.168.217.100:11311; else export ROS_MASTER_URI=http://192.168.217.1:11311; fi; export ROS_IP=192.168.217.100; echo ROS_MASTER_URI=\\$ROS_MASTER_URI; echo ROS_IP=\\$ROS_IP; echo COMPOSE_PROFILES=\\$COMPOSE_PROFILES; cd /home/naviai/navi_project && docker compose down {module_name} && docker compose up -d {module_name}\"",
     "start_command": "",
     "health_command": "",

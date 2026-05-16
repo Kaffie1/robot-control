@@ -34,6 +34,8 @@ pip install -r requirements.txt
 python3 -m backend.main
 ```
 
+统一启动入口就是 `backend/main.py`，推荐始终使用 `python3 -m backend.main` 启动，避免出现多套启动方式。
+
 3. 浏览器访问：
 
 ```text
@@ -68,6 +70,12 @@ chmod +x service.sh
 
 ```bash
 PYTHON_BIN=/path/to/python APP_PORT=9000 ./service.sh start
+```
+
+容器通过 `docker_compose_up_module` 启动后的默认等待时间可通过环境变量覆盖：
+
+```bash
+DOCKER_COMPOSE_UP_WAIT_SECONDS=15
 ```
 
 服务日志和 PID 文件位于：
@@ -140,7 +148,7 @@ PYTHON_BIN=/path/to/python APP_PORT=9000 ./service.sh start
 
 - 当前连接状态查询
 - ORIN / PICO 目录浏览与文本文件读取
-- 只读远程诊断命令执行
+- 只读远程诊断命令执行，底层统一走交互式 SSH
 - ROS topic / service 列表、类型、定义、样本消息查询
 
 ## 故障排查对话
@@ -155,12 +163,19 @@ PYTHON_BIN=/path/to/python APP_PORT=9000 ./service.sh start
 相关文档位于 `config/`：
 
 - `config/fault_prompt_template.yaml`
-- `config/fault_playbooks.yaml`
-- `config/fault_tools.yaml`
+- `config/fault_playbooks/`
+- `config/fault_rules.yaml`：规则模板和写法说明，不放具体业务规则
+- `config/fault_playbooks/playbook.template.yaml`：playbook 标准模板
+- `config/fault_playbooks/rules.template.yaml`：规则标准模板
+- `config/fault_playbooks/<playbook_id>/rules.yaml`：每个 playbook 自己的规则实现
+- `config/fault_playbooks/<playbook_id>/playbook.yaml` 支持用 `on_fail.action: call_playbook` 跳转到子 playbook
+- `config/fault_playbooks/<playbook_id>/playbook.yaml` 里的步骤优先使用 `assert_ref`，也支持直接写 `assert`
+- `config/fault_playbooks/<playbook_id>/playbook.yaml` 还可以用 `success_criteria` 定义最终恢复判定；需要等现场稳定时可以加 `wait_seconds`，需要连续确认时可以加 `confirm_times`
 
 人类可读版说明见 `docs/fault_diagnosis.md`。外部人员只需要描述现象，不必填写完整故障报告。
 
-如果你要扩展故障排查能力，优先改这些文档，再补充 `backend/agent_tools.py` 里的实际工具实现。
+如果你要扩展故障排查能力，优先改这些文档，再补充 `backend/agent/tools/registry.py` 和 `backend/agent/tools/runtime.py` 里的实际工具实现。
+规则模板和写法说明在 `config/fault_rules.yaml`，新增 playbook 时可以先复制 `config/fault_playbooks/playbook.template.yaml` 和 `config/fault_playbooks/rules.template.yaml`，再把具体规则实现放到对应 playbook 目录的 `rules.yaml`。playbook 步骤优先用 `assert_ref` 引用本目录规则，必要时也可以直接写 `assert`。
 
 故障排查轨迹会单独写入 `.runtime/fault_diagnosis.log`，里面记录的是现象、模型输出的结构化命令、工具调用和结果，不包含隐藏思考过程。
 

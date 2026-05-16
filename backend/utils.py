@@ -1,8 +1,10 @@
 import json
+import logging
 import os
 import posixpath
 import re
 import shlex
+import sys
 import tempfile
 import urllib.parse
 from datetime import datetime
@@ -21,6 +23,7 @@ from .config import (
     DATA_DIR,
     DB_PATH,
     DOWNLOAD_TMP_DIR,
+    FAULT_TRACE_LOG_PATH,
     LEGACY_CONNECTION_CACHE_PATH,
     LEGACY_DB_PATH,
     MODULE_DEPLOY_NAMES,
@@ -28,6 +31,87 @@ from .config import (
     TEMPLATE_DIR,
 )
 from .models import ApiError
+
+
+def setup_fault_logger() -> logging.Logger:
+    logger = logging.getLogger("fault_diagnosis")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    log_path = Path(FAULT_TRACE_LOG_PATH).parent / "fault_diagnosis.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8", mode="a")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(logging.INFO)
+    stream_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+
+    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
+    return logger
+
+
+class PrettyTraceFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        raw_message = super().format(record)
+        try:
+            payload = json.loads(raw_message)
+        except json.JSONDecodeError:
+            return raw_message
+        return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def setup_fault_trace_logger() -> logging.Logger:
+    logger = logging.getLogger("fault_diagnosis.trace")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    log_path = Path(FAULT_TRACE_LOG_PATH)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8", mode="a")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(PrettyTraceFormatter("%(message)s"))
+
+    logger.addHandler(file_handler)
+    return logger
+
+
+_fault_logger: logging.Logger | None = None
+
+
+def get_fault_logger() -> logging.Logger:
+    global _fault_logger
+    if _fault_logger is None:
+        _fault_logger = setup_fault_logger()
+    return _fault_logger
+
+
+_fault_trace_logger: logging.Logger | None = None
+
+
+def get_fault_trace_logger() -> logging.Logger:
+    global _fault_trace_logger
+    if _fault_trace_logger is None:
+        _fault_trace_logger = setup_fault_trace_logger()
+    return _fault_trace_logger
 
 
 def now_text() -> str:
@@ -310,7 +394,7 @@ def is_api_request(request: Request) -> bool:
 
 
 def get_asset_version() -> str:
-    candidates = [STATIC_DIR / "app.js", STATIC_DIR / "style.css", TEMPLATE_DIR / "index.html"]
+    candidates = [TEMPLATE_DIR / "index.html", *sorted((STATIC_DIR / "css").glob("*.css")), *sorted((STATIC_DIR / "js").glob("*.js"))]
     latest_mtime = 0.0
     for path in candidates:
         try:

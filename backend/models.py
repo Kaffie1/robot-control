@@ -59,14 +59,8 @@ class RosServiceCallPayload(BaseModel):
     request: str = ""
 
 
-class ChatMessagePayload(BaseModel):
-    role: str
-    content: str
-
-
 class ChatRequestPayload(BaseModel):
     message: str
-    history: list[ChatMessagePayload] = Field(default_factory=list)
 
 
 class AgentToolCallPayload(BaseModel):

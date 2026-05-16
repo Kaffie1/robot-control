@@ -3,6 +3,7 @@ import posixpath
 import shlex
 import tempfile
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -74,7 +75,9 @@ def render_package_install_command(
 
 
 def probe_remote_package_supports_credentials(client: RobotClient, remote_path: str) -> bool:
-    command = f"grep -a -Eq -- '--user|--password' -- {shlex.quote(remote_path)}"
+    # The first `--` terminates grep option parsing before a pattern that starts with `--`.
+    # Adding another `--` after the pattern makes grep treat it as an input filename.
+    command = f"grep -a -Eq -- '--user|--password' {shlex.quote(remote_path)}"
     result = client.exec_command(command)
     if result["exit_code"] == 0:
         return True
@@ -396,6 +399,7 @@ def create_module_deploy_runner(
     auto_deploy_version: str = "",
     upload_token: str,
     install_template: str,
+    up_wait_seconds: int = 10,
     start_command: str,
     health_command: str,
     rollback_template: str,
@@ -568,6 +572,7 @@ def create_module_deploy_runner(
             "module_name": module_name,
             "module_path": module_path,
             "compose_profiles": "",
+            "up_wait_seconds": max(int(up_wait_seconds or 0), 0),
             "package_file_name": package_file_names[0] if package_file_names else "",
             "package_files": [],
             "removed_files": [],
@@ -747,6 +752,9 @@ def create_module_deploy_runner(
         log_command_result(ctx, "模块安装命令", install_result)
         if install_result["exit_code"] != 0:
             raise TaskFailure("模块安装命令执行失败", {"summary": summary, "history": history})
+        if summary["up_wait_seconds"] > 0:
+            ctx.log(f"容器启动后等待 {summary['up_wait_seconds']} 秒再继续")
+            time.sleep(summary["up_wait_seconds"])
         if start_command:
             ctx.log(f"执行启动命令: {start_command}")
             start_result = client.exec_command(start_command)

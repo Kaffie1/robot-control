@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .config import MAX_CONNECTION_CACHE_ITEMS, MAX_TASK_ITEMS
+from .config import CHAT_SESSION_DIR, MAX_CONNECTION_CACHE_ITEMS, MAX_TASK_ITEMS
 from .models import TaskFailure
 from .robot import RobotClient
 from .utils import now_text
@@ -79,6 +79,7 @@ def normalize_deploy_profile(profile: Any, defaults: dict[str, Any]) -> dict[str
         install_template = defaults["install_template"]
     normalized = {
         "probe_command_template": probe_command_template,
+        "up_wait_seconds": max(int(item.get("up_wait_seconds", defaults.get("up_wait_seconds", 0)) or 0), 0),
         "install_template": install_template,
         "start_command": str(item.get("start_command", defaults["start_command"])).strip(),
         "health_command": str(item.get("health_command", defaults["health_command"])).strip(),
@@ -104,6 +105,7 @@ def normalize_deploy_profile(profile: Any, defaults: dict[str, Any]) -> dict[str
                 continue
             machine_profiles[normalized_key] = {
                 "probe_command_template": str(machine_item.get("probe_command_template", normalized["probe_command_template"])).strip(),
+                "up_wait_seconds": max(int(machine_item.get("up_wait_seconds", normalized["up_wait_seconds"]) or 0), 0),
                 "install_template": str(machine_item.get("install_template", normalized["install_template"])).strip()
                 or normalized["install_template"],
                 "start_command": str(machine_item.get("start_command", normalized["start_command"])).strip(),
@@ -506,20 +508,53 @@ class SessionStore:
         self.sessions: dict[str, dict[str, Any]] = {}
         self.lock = threading.Lock()
 
+    def _build_chat_history_path(self, sid: str) -> Path:
+        normalized_sid = str(sid or "").strip()
+        if not normalized_sid:
+            normalized_sid = "anonymous"
+        return CHAT_SESSION_DIR / f"{normalized_sid}.json"
+
+    def _initialize_chat_history_file(self, sid: str) -> Path:
+        path = self._build_chat_history_path(sid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text("[]\n", encoding="utf-8")
+        return path
+
+    def _delete_chat_history_file(self, session: dict[str, Any]) -> None:
+        raw_path = str(session.get("chat_history_path") or "").strip()
+        path = Path(raw_path) if raw_path else self._build_chat_history_path(str(session.get("session_id") or ""))
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
+
+    def _release_session_resources(self, session: dict[str, Any], *, remove_history_file: bool = True) -> None:
+        client = session.get("client")
+        if isinstance(client, RobotClient):
+            client.close()
+        session["chat_state"] = {}
+        if remove_history_file:
+            self._delete_chat_history_file(session)
+
     def get_or_create(self, sid: str | None) -> tuple[str, dict[str, Any], bool]:
         with self.lock:
             if sid and sid in self.sessions:
                 self.sessions[sid]["last_seen_ts"] = time.time()
                 return sid, self.sessions[sid], False
             new_sid = secrets.token_hex(16)
+            chat_history_path = self._initialize_chat_history_file(new_sid)
             self.sessions[new_sid] = {
                 "session_id": new_sid,
                 "client": RobotClient(),
+                "chat_history_path": str(chat_history_path),
                 "last_seen_ts": time.time(),
                 "path_cache": [],
                 "last_remote_deb_path": "",
                 "remote_shortcuts": [],
                 "preferred_root": "/",
+                "chat_state": {},
                 "last_config": {
                     "host": "",
                     "port": 22,
@@ -557,9 +592,7 @@ class SessionStore:
             for sid in expired_ids:
                 expired_sessions.append(self.sessions.pop(sid))
         for session in expired_sessions:
-            client = session.get("client")
-            if isinstance(client, RobotClient):
-                client.close()
+            self._release_session_resources(session)
         return len(expired_sessions)
 
     def close_all(self) -> None:
@@ -567,9 +600,7 @@ class SessionStore:
             sessions = list(self.sessions.values())
             self.sessions.clear()
         for session in sessions:
-            client = session.get("client")
-            if isinstance(client, RobotClient):
-                client.close()
+            self._release_session_resources(session)
 
 
 class UploadProgressManager:

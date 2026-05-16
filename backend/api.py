@@ -3,7 +3,6 @@ import io
 import os
 import posixpath
 import re
-import shlex
 import threading
 import traceback
 import zipfile
@@ -17,21 +16,33 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Str
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .agent_tools import agent_tool_registry
-from .chat import invoke_chat_model
+from .agent.tools import agent_tool_registry
 from .config import (
     DEPLOY_CONFIG_PATH,
     MAX_TASK_ITEMS,
     MODULE_DEPLOY_ROOT,
-    ROSBRIDGE_SERVICE_NAME,
-    ROS_COMPOSE_PROJECT_ROOT,
     SESSION_CLEANUP_INTERVAL_SECONDS,
     SESSION_COOKIE,
     SESSION_IDLE_TIMEOUT_SECONDS,
     STATIC_DIR,
 )
+from .agent.common import append_chat_history_turn, delete_chat_history_file, get_chat_history, reset_chat_state
+from .agent.conversation import invoke_chat_model
 from .models import AgentToolCallPayload, ApiError, ChatRequestPayload, ConnectPayload, ConnectionConfig, ExecutePayload, InstallDebPayload, RosServiceCallPayload, RosTopicPublishPayload
 from .runtime import connection_cache_store, deploy_config_store, history_store, session_store, task_manager, templates, upload_progress_manager
+from .ros_ops import (
+    ros_list_services,
+    ros_list_topics,
+    ros_message_definition,
+    ros_service_call,
+    ros_service_definition_by_name,
+    ros_service_info,
+    ros_service_type,
+    ros_topic_echo,
+    ros_topic_info,
+    ros_topic_publish,
+    ros_topic_type,
+)
 from .services import (
     build_file_replace_history,
     create_package_target_client,
@@ -185,212 +196,6 @@ def create_app() -> FastAPI:
             {"value": "I2", "label": "I2"},
         ]
 
-    ros_name_pattern = re.compile(r"^/?[A-Za-z0-9_~/.-]+(?:/[A-Za-z0-9_~/.-]+)*$")
-    ros_type_pattern = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:/[A-Za-z][A-Za-z0-9_]*)+$")
-
-    def normalize_ros_name(name: str, *, label: str = "ROS 接口名") -> str:
-        normalized_name = str(name or "").strip()
-        if not normalized_name:
-            raise ApiError(f"{label}不能为空")
-        if not ros_name_pattern.fullmatch(normalized_name):
-            raise ApiError(f"非法{label}: {normalized_name}")
-        return normalized_name
-
-    def normalize_ros_type_name(type_name: str) -> str:
-        normalized_type_name = str(type_name or "").strip()
-        if not normalized_type_name:
-            raise ApiError("消息类型不能为空")
-        if not ros_type_pattern.fullmatch(normalized_type_name):
-            raise ApiError(f"非法消息类型: {normalized_type_name}")
-        return normalized_type_name
-
-    ros_builtin_types = {
-        "bool",
-        "byte",
-        "char",
-        "int8",
-        "uint8",
-        "int16",
-        "uint16",
-        "int32",
-        "uint32",
-        "int64",
-        "uint64",
-        "float32",
-        "float64",
-        "string",
-        "time",
-        "duration",
-    }
-
-    def strip_ros_comment(line: str) -> str:
-        return str(line or "").split("#", 1)[0].rstrip()
-
-    def normalize_ros_field_type(field_type: str) -> str:
-        return re.sub(r"\[[^\]]*\]$", "", str(field_type or "").strip())
-
-    def resolve_ros_nested_type(field_type: str, current_package: str) -> str:
-        normalized_field_type = normalize_ros_field_type(field_type)
-        if not normalized_field_type or normalized_field_type in ros_builtin_types:
-            return ""
-        if "/" in normalized_field_type:
-            return normalize_ros_type_name(normalized_field_type)
-        if normalized_field_type == "Header":
-            return "std_msgs/Header"
-        return normalize_ros_type_name(f"{current_package}/{normalized_field_type}")
-
-    def split_ros_service_sections(source_text: str) -> list[list[str]]:
-        sections: list[list[str]] = [[]]
-        for raw_line in str(source_text or "").splitlines():
-            if raw_line.strip() == "---":
-                sections.append([])
-                continue
-            sections[-1].append(raw_line)
-        return sections
-
-    def expand_ros_interface_lines(
-        client,
-        type_name: str,
-        *,
-        interface_kind: str,
-        source_text: str,
-        seen_types: set[str] | None = None,
-    ) -> list[str]:
-        normalized_type_name = normalize_ros_type_name(type_name)
-        current_package, _ = normalized_type_name.split("/", 1)
-        visited = set(seen_types or set())
-        visited.add(normalized_type_name)
-        expanded_lines: list[str] = []
-
-        for raw_line in str(source_text or "").splitlines():
-            line_text = str(raw_line).rstrip()
-            code_text = strip_ros_comment(raw_line).strip()
-            expanded_lines.append(line_text)
-            if not code_text or code_text == "---" or "=" in code_text:
-                continue
-            match = re.match(r"^([A-Za-z][A-Za-z0-9_/]*(?:\[[^\]]*\])?)\s+([A-Za-z][A-Za-z0-9_]*)$", code_text)
-            if not match:
-                continue
-            nested_type_name = resolve_ros_nested_type(match.group(1), current_package)
-            if not nested_type_name or nested_type_name in visited:
-                continue
-            nested_source = read_ros_interface_source(
-                client,
-                nested_type_name,
-                interface_kind=interface_kind,
-                expand_nested=False,
-            )
-            nested_lines = expand_ros_interface_lines(
-                client,
-                nested_type_name,
-                interface_kind=interface_kind,
-                source_text=str(nested_source.get("raw_output") or ""),
-                seen_types=visited | {nested_type_name},
-            )
-            expanded_lines.extend([f"  {line}" if line else "" for line in nested_lines])
-        return expanded_lines
-
-    def read_ros_interface_source(
-        client,
-        type_name: str,
-        *,
-        interface_kind: str,
-        expand_nested: bool = True,
-    ) -> dict[str, Any]:
-        normalized_type_name = normalize_ros_type_name(type_name)
-        package_name, interface_name = normalized_type_name.split("/", 1)
-        extension = "msg" if interface_kind == "msg" else "srv"
-        relative_source_path = f"share/{package_name}/{extension}/{interface_name}.{extension}"
-        resolve_command = (
-            "found=''; "
-            f"for candidate in /opt/ros/*/{shlex.quote(relative_source_path)}; do "
-            "if [ -f \"$candidate\" ]; then found=\"$candidate\"; break; fi; "
-            "done; "
-            "if [ -z \"$found\" ]; then exit 1; fi; "
-            "printf '%s\\n' \"$found\"; "
-            "cat \"$found\""
-        )
-        result = run_rosbridge_command(client, resolve_command)
-        command_output = build_command_output_text(result)
-        output_lines = command_output.splitlines()
-        source_path = output_lines[0].strip() if output_lines else ""
-        raw_output = "\n".join(output_lines[1:]).strip()
-        if not source_path or not raw_output:
-            raise ApiError(f"未读取到 {interface_kind} 源文件: /opt/ros/*/{relative_source_path}")
-        output = raw_output
-        if expand_nested:
-            if interface_kind == "srv":
-                sections = split_ros_service_sections(raw_output)
-                expanded_sections = [
-                    "\n".join(
-                        expand_ros_interface_lines(
-                            client,
-                            normalized_type_name,
-                            interface_kind="msg",
-                            source_text="\n".join(section_lines),
-                        )
-                    ).rstrip()
-                    for section_lines in sections
-                ]
-                output = "\n---\n".join(expanded_sections).rstrip()
-            else:
-                output = "\n".join(
-                    expand_ros_interface_lines(
-                        client,
-                        normalized_type_name,
-                        interface_kind=interface_kind,
-                        source_text=raw_output,
-                    )
-                ).rstrip()
-        return {
-            "type_name": normalized_type_name,
-            "source_path": source_path,
-            "output": output,
-            "raw_output": raw_output,
-        }
-
-    def run_rosbridge_command(client, command: str, *, timeout: float = 20.0) -> dict[str, Any]:
-        result = client.exec_compose_service_command(
-            ROS_COMPOSE_PROJECT_ROOT,
-            ROSBRIDGE_SERVICE_NAME,
-            command,
-            timeout=timeout,
-        )
-        exit_code = int(result.get("exit_code") or 0)
-        if exit_code != 0:
-            stderr = strip_compose_warning_lines(str(result.get("stderr") or ""))
-            stdout = str(result.get("stdout") or "").strip()
-            raw_stderr = str(result.get("stderr") or "").strip()
-            detail = stderr or stdout or raw_stderr or f"退出码 {exit_code}"
-            raise ApiError(f"ROS 命令执行失败（service {ROSBRIDGE_SERVICE_NAME}）: {detail}")
-        return result
-
-    def list_ros_names(output: str) -> list[str]:
-        return [line.strip() for line in str(output or "").splitlines() if line.strip()]
-
-    def strip_compose_warning_lines(text: str) -> str:
-        cleaned_lines: list[str] = []
-        for raw_line in str(text or "").splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            if 'level=warning' in line and 'variable is not set. Defaulting to a blank string.' in line:
-                continue
-            if 'level=warning' in line and 'project has been loaded without an explicit name from a symlink.' in line:
-                continue
-            cleaned_lines.append(raw_line)
-        return "\n".join(cleaned_lines).strip()
-
-    def build_command_output_text(result: dict[str, Any]) -> str:
-        stdout = strip_compose_warning_lines(str(result.get("stdout") or ""))
-        stderr = strip_compose_warning_lines(str(result.get("stderr") or ""))
-        parts = []
-        if stdout:
-            parts.append(stdout)
-        if stderr:
-            parts.append(f"[stderr]\n{stderr}")
-        return "\n\n".join(parts).strip()
-
     @app.middleware("http")
     async def attach_session(request: Request, call_next):
         sid = request.cookies.get(SESSION_COOKIE)
@@ -460,6 +265,7 @@ def create_app() -> FastAPI:
             refresh_remote_shortcuts(session)
         return {
             "ok": True,
+            "session_id": get_session_id(request),
             "connected": session["client"].connected,
             "last_config": session["last_config"],
             "last_remote_deb_path": session["last_remote_deb_path"],
@@ -517,6 +323,9 @@ def create_app() -> FastAPI:
         session["client"].close()
         session["remote_shortcuts"] = []
         session["preferred_root"] = "/"
+        tool_context = {"session": session}
+        reset_chat_state(tool_context)
+        delete_chat_history_file(tool_context)
         session["ssh_auth"] = {"username": str(session["last_config"].get("username") or ""), "password": ""}
         session["processor_auth"] = {
             "ORIN": {
@@ -538,21 +347,34 @@ def create_app() -> FastAPI:
     def api_chat(payload: ChatRequestPayload, request: Request):
         session = get_session(request)
         last_config = session.get("last_config") or {}
+        tool_context = {"session": session}
         result = invoke_chat_model(
             payload.message,
-            history=[item.model_dump() for item in payload.history],
             runtime_context={
                 "connected": bool(session["client"].connected),
                 "host": str(last_config.get("host") or ""),
                 "port": str(last_config.get("port") or ""),
                 "username": str(last_config.get("username") or ""),
                 "preferred_root": str(session.get("preferred_root") or "/"),
-                "remote_shortcuts": session.get("remote_shortcuts") or [],
                 "recent_tasks": task_manager.list_tasks_for_owner(get_session_id(request), MAX_TASK_ITEMS),
             },
-            tool_context={"session": session},
+            tool_context=tool_context,
+        )
+        append_chat_history_turn(
+            tool_context,
+            user_message=payload.message,
+            assistant_message=str(result.get("message") or ""),
         )
         return {"ok": True, **result}
+
+    @app.post("/api/chat/reset")
+    def api_chat_reset(request: Request):
+        reset_chat_state({"session": get_session(request)})
+        return {"ok": True, "message": "聊天上下文已清空"}
+
+    @app.get("/api/chat/history")
+    def api_chat_history(request: Request):
+        return {"ok": True, "history": get_chat_history({"session": get_session(request)})}
 
     @app.get("/api/agent/tools")
     def api_agent_tools():
@@ -586,118 +408,67 @@ def create_app() -> FastAPI:
 
     @app.get("/api/ping")
     def api_ping(request: Request):
-        return {"ok": True, "session_id": get_session_id(request)}
+        session = get_session(request)
+        return {
+            "ok": True,
+            "session_id": get_session_id(request),
+            "connected": bool(session["client"].connected),
+        }
 
     @app.get("/api/ros/topics")
     def api_ros_topics(request: Request):
         client = ensure_client_connected(get_session(request))
-        result = run_rosbridge_command(client, "rostopic list")
-        return {"ok": True, "items": list_ros_names(result.get("stdout", ""))}
+        return {"ok": True, **ros_list_topics(client)}
 
     @app.get("/api/ros/services")
     def api_ros_services(request: Request):
         client = ensure_client_connected(get_session(request))
-        result = run_rosbridge_command(client, "rosservice list")
-        return {"ok": True, "items": list_ros_names(result.get("stdout", ""))}
+        return {"ok": True, **ros_list_services(client)}
 
     @app.get("/api/ros/topic-info")
     def api_ros_topic_info(request: Request, name: str = ""):
         client = ensure_client_connected(get_session(request))
-        topic_name = normalize_ros_name(name, label="topic 名称")
-        result = run_rosbridge_command(client, f"rostopic info {shlex.quote(topic_name)}")
-        return {"ok": True, "name": topic_name, "output": build_command_output_text(result)}
+        return {"ok": True, **ros_topic_info(client, name)}
 
     @app.get("/api/ros/topic-type")
     def api_ros_topic_type(request: Request, name: str = ""):
         client = ensure_client_connected(get_session(request))
-        topic_name = normalize_ros_name(name, label="topic 名称")
-        result = run_rosbridge_command(client, f"rostopic type {shlex.quote(topic_name)}")
-        return {"ok": True, "name": topic_name, "output": build_command_output_text(result)}
+        return {"ok": True, **ros_topic_type(client, name)}
 
     @app.get("/api/ros/message-definition")
     def api_ros_message_definition(request: Request, type_name: str = ""):
         client = ensure_client_connected(get_session(request))
-        normalized_type_name = normalize_ros_type_name(type_name)
-        try:
-            source_payload = read_ros_interface_source(client, normalized_type_name, interface_kind="msg")
-            return {
-                "ok": True,
-                "type_name": str(source_payload.get("type_name") or normalized_type_name),
-                "source_path": str(source_payload.get("source_path") or ""),
-                "output": str(source_payload.get("output") or ""),
-            }
-        except Exception:
-            result = run_rosbridge_command(client, f"rosmsg show {shlex.quote(normalized_type_name)}")
-            return {"ok": True, "type_name": normalized_type_name, "source_path": "", "output": build_command_output_text(result)}
+        return {"ok": True, **ros_message_definition(client, type_name)}
 
     @app.get("/api/ros/topic-echo")
     def api_ros_topic_echo(request: Request, name: str = ""):
         client = ensure_client_connected(get_session(request))
-        topic_name = normalize_ros_name(name, label="topic 名称")
-        result = run_rosbridge_command(client, f"timeout 3s rostopic echo -n 1 {shlex.quote(topic_name)}", timeout=5.0)
-        return {"ok": True, "name": topic_name, "output": build_command_output_text(result)}
+        return {"ok": True, **ros_topic_echo(client, name, timeout=15.0, line_limit=120)}
 
     @app.post("/api/ros/topic-pub")
     def api_ros_topic_pub(payload: RosTopicPublishPayload, request: Request):
         client = ensure_client_connected(get_session(request))
-        topic_name = normalize_ros_name(payload.name, label="topic 名称")
-        message_type = normalize_ros_type_name(payload.message_type)
-        message = str(payload.message or "").strip()
-        command = f"rostopic pub -1 {shlex.quote(topic_name)} {shlex.quote(message_type)}"
-        if message:
-            command = f"{command} {shlex.quote(message)}"
-        result = run_rosbridge_command(client, command, timeout=12.0)
-        return {"ok": True, "name": topic_name, "output": build_command_output_text(result)}
+        return {"ok": True, **ros_topic_publish(client, payload.name, payload.message_type, payload.message)}
 
     @app.get("/api/ros/service-info")
     def api_ros_service_info(request: Request, name: str = ""):
         client = ensure_client_connected(get_session(request))
-        service_name = normalize_ros_name(name, label="service 名称")
-        result = run_rosbridge_command(client, f"rosservice info {shlex.quote(service_name)}")
-        return {"ok": True, "name": service_name, "output": build_command_output_text(result)}
+        return {"ok": True, **ros_service_info(client, name)}
 
     @app.get("/api/ros/service-type")
     def api_ros_service_type(request: Request, name: str = ""):
         client = ensure_client_connected(get_session(request))
-        service_name = normalize_ros_name(name, label="service 名称")
-        result = run_rosbridge_command(client, f"rosservice type {shlex.quote(service_name)}")
-        return {"ok": True, "name": service_name, "output": build_command_output_text(result)}
+        return {"ok": True, **ros_service_type(client, name)}
 
     @app.get("/api/ros/service-definition")
     def api_ros_service_definition(request: Request, name: str = ""):
         client = ensure_client_connected(get_session(request))
-        service_name = normalize_ros_name(name, label="service 名称")
-        type_result = run_rosbridge_command(client, f"rosservice type {shlex.quote(service_name)}")
-        normalized_type_name = normalize_ros_type_name(build_command_output_text(type_result).splitlines()[0] if build_command_output_text(type_result) else "")
-        try:
-            source_payload = read_ros_interface_source(client, normalized_type_name, interface_kind="srv")
-            return {
-                "ok": True,
-                "name": service_name,
-                "type_name": str(source_payload.get("type_name") or normalized_type_name),
-                "source_path": str(source_payload.get("source_path") or ""),
-                "output": str(source_payload.get("output") or ""),
-            }
-        except Exception:
-            definition_result = run_rosbridge_command(client, f"rossrv show {shlex.quote(normalized_type_name)}")
-            return {
-                "ok": True,
-                "name": service_name,
-                "type_name": normalized_type_name,
-                "source_path": "",
-                "output": build_command_output_text(definition_result),
-            }
+        return {"ok": True, **ros_service_definition_by_name(client, name)}
 
     @app.post("/api/ros/service-call")
     def api_ros_service_call(payload: RosServiceCallPayload, request: Request):
         client = ensure_client_connected(get_session(request))
-        service_name = normalize_ros_name(payload.name, label="service 名称")
-        request_text = str(payload.request or "").strip()
-        command = f"rosservice call {shlex.quote(service_name)}"
-        if request_text:
-            command = f"{command} {shlex.quote(request_text)}"
-        result = run_rosbridge_command(client, command, timeout=12.0)
-        return {"ok": True, "name": service_name, "output": build_command_output_text(result)}
+        return {"ok": True, **ros_service_call(client, payload.name, payload.request)}
 
     @app.get("/api/deploy-target")
     def api_deploy_target(request: Request, file_name: str = "", machine_type: str = "", device_type: str = "ORIN"):
@@ -954,7 +725,7 @@ def create_app() -> FastAPI:
                     probe_warning = f"检测到 ROBOT_TYPE={robot_type_value}，但不在可配置机型范围内，请手动选择机型"
                 else:
                     selected_machine_type = normalized_robot_type
-                    machine_options = [
+                    machine_options = fallback_machine_options or [
                         {
                             "value": normalized_robot_type,
                             "label": normalized_robot_type,
@@ -1093,6 +864,7 @@ def create_app() -> FastAPI:
             auto_deploy_version=str(auto_module_version or "").strip(),
             upload_token=str(upload_token or "").strip(),
             install_template=deploy_profile["install_template"],
+            up_wait_seconds=int(deploy_profile.get("up_wait_seconds") or 0),
             start_command=deploy_profile["start_command"],
             health_command=deploy_profile["health_command"],
             rollback_template=deploy_profile["rollback_template"],
@@ -1107,6 +879,7 @@ def create_app() -> FastAPI:
                 "deploy_mode": "module",
                 "module_name": selected_module_name,
                 "module_path": selected_module_path,
+                "up_wait_seconds": int(deploy_profile.get("up_wait_seconds") or 0),
                 "package_file_name": first_package_name,
                 "package_file_names": [str(item.get("package_file_name") or "") for item in package_files],
                 "package_count": len(package_files),
@@ -1181,7 +954,7 @@ def create_app() -> FastAPI:
         session = get_session(request)
         remote_path = require_text(payload.remote_path, "远程 deb 路径不能为空")
         command = render_remote_command(str(payload.command_template or "dpkg -i {deb_path}"), remote_path)
-        result = ensure_client_connected(session).exec_command(command)
+        result = ensure_client_connected(session).exec_interactive_command(command)
         session["last_remote_deb_path"] = remote_path
         return {"ok": True, "command": command, "result": result}
 

@@ -1,0 +1,56 @@
+version: 1
+description: no localization rules
+
+rules:
+  rule_1:
+    # 通用规则 1：判断点云里 point_num 是否大于 0。
+    type: compare
+    field: output
+    extract:
+      type: regex
+      pattern: "point_num:\\s*(\\d+)"
+      group: 1
+    op: greater_than
+    cast: number
+    value: 0
+
+  rule_2:
+    # 通用规则 2：判断地图列表里是否包含目标地图。
+    type: compare
+    field: output
+    op: contains
+    value:
+      from_context: target_map
+
+  rule_3:
+    # 通用规则 3：判断输出是否非空。
+    type: compare
+    field: output
+    op: not_empty
+
+  rule_4:
+    # 通用规则 4：判断 ROS service 调用是否成功。
+    op: and
+    conditions:
+      - type: compare
+        field: output
+        op: not_empty
+      - type: compare
+        field: output
+        op: not_contains
+        value: ERROR
+      - type: compare
+        field: output
+        op: not_contains
+        value: failed
+      - type: compare
+        field: output
+        op: not_contains
+        value: exception
+
+  rule_5:
+    # 通用规则 5：判断里程计输出是否不是全 0。
+    type: compare
+    field: output
+    op: regex_match
+    value: "(?m)^\\s*(?:x|y|z):\\s*(?!0(?:\\.0+)?(?:\\s|$))[-+]?(?:\\d+(?:\\.\\d+)?|\\.\\d+)"
