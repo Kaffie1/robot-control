@@ -22,6 +22,7 @@ def build_fault_doc_context_from_playbook(playbook: dict[str, Any] | None) -> st
         "source_path": playbook.get("source_path", ""),
         "rules_source_path": playbook.get("rules_source_path", ""),
         "script": playbook.get("script", []),
+        "root": playbook.get("root", {}),
         "success_criteria": playbook.get("success_criteria", []),
         "escalation_notes": playbook.get("escalation_notes", []),
         "execution_notes": playbook.get("execution_notes", []),

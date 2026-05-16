@@ -1,0 +1,57 @@
+version: 1
+description: robot not moving diagnosis playbook
+
+playbooks:
+  - id: robot-not-moving
+    title: 小车不动
+    root:
+      type: sequence
+      name: diagnose_robot_not_moving
+      children:
+        - type: selector
+          name: ensure_cmd_vel_available
+          children:
+            - type: condition
+              name: check_cmd_vel_calib_has_data
+              tool_name: ros_topic_echo
+              arguments:
+                name: /zj_humanoid/cmd_vel/calib
+              assert_ref: rule_1
+            - type: call_playbook
+              name: restart_chassis_when_cmd_vel_missing
+              playbook_id: restart-chassis-when-cmd-vel-missing
+              failure_message: /zj_humanoid/cmd_vel/calib 当前没有数据，先重启 chassis 容器
+        - type: selector
+          name: ensure_non_zero_cmd_vel
+          children:
+            - type: condition
+              name: check_cmd_vel_calib_not_all_zero
+              tool_name: ros_topic_echo
+              arguments:
+                name: /zj_humanoid/cmd_vel/calib
+              assert_ref: rule_2
+            - type: result
+              name: report_zero_velocity
+              status: failure
+              message: /zj_humanoid/cmd_vel/calib 有数据但全为 0，底盘目前没有收到速度指令
+        - type: condition
+          name: confirm_cmd_vel_calib_not_all_zero
+          tool_name: ros_topic_echo
+          arguments:
+            name: /zj_humanoid/cmd_vel/calib
+          assert_ref: rule_2
+          confirm_times: 2
+          failure_message: /zj_humanoid/cmd_vel/calib 需要连续确认不是全 0，当前还不能判定速度指令链路稳定
+    escalation_notes:
+      - "如果 /zj_humanoid/cmd_vel/calib 长时间无数据，且重启 chassis 后仍无数据，请继续检查 rosbridge、底盘模块和上游导航/遥控链路"
+      - "如果 /zj_humanoid/cmd_vel/calib 有数据但持续全 0，本 playbook 直接返回底盘目前没有收到速度指令，不再自动恢复 chassis"
+      - "如果 /zj_humanoid/cmd_vel/calib 短暂恢复后又回到全 0，转底盘或导航同事继续定位上游原因"
+    execution_notes:
+      - "ROS 检查通过 rosbridge 环境执行"
+      - "先判定 /zj_humanoid/cmd_vel/calib 是否有数据，再判定速度指令是否全为 0"
+      - "只有在 /zj_humanoid/cmd_vel/calib 无数据时，才跳转到 chassis 重启子 playbook"
+
+global_rules:
+  - 只使用 protocol.md 中真实存在的接口名
+  - 同一任务中最多执行一次自动恢复
+  - 有数据但全为 0 时直接给出结论，不重复做容器恢复

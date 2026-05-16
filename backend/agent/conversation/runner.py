@@ -45,6 +45,8 @@ def build_script_context(scripted_playbook: dict[str, Any]) -> dict[str, Any]:
         "steps": scripted_playbook.get("steps", []),
         "success_criteria_results": scripted_playbook.get("success_criteria_results", []),
         "sub_playbook": scripted_playbook.get("sub_playbook", None),
+        "sub_playbooks": scripted_playbook.get("sub_playbooks", []),
+        "matched_root": (scripted_playbook.get("matched_context") or {}).get("root", {}),
     }
 
 
@@ -52,6 +54,8 @@ def extend_tool_traces_from_script(
     tool_traces: list[dict[str, Any]],
     scripted_playbook: dict[str, Any],
 ) -> None:
+    if not isinstance(scripted_playbook, dict):
+        return
     script_steps = scripted_playbook.get("steps")
     if isinstance(script_steps, list):
         for step in script_steps:
@@ -81,6 +85,14 @@ def extend_tool_traces_from_script(
                             "result": attempt.get("output", ""),
                         }
                     )
+    nested_playbooks = scripted_playbook.get("sub_playbooks")
+    if isinstance(nested_playbooks, list) and nested_playbooks:
+        for nested_playbook in nested_playbooks:
+            extend_tool_traces_from_script(tool_traces, nested_playbook)
+        return
+    nested_playbook = scripted_playbook.get("sub_playbook")
+    if isinstance(nested_playbook, dict):
+        extend_tool_traces_from_script(tool_traces, nested_playbook)
 
 
 def build_chat_messages(

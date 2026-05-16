@@ -5,11 +5,23 @@
 # 真正生效的 playbook 应该放在：
 #   config/fault_playbooks/<playbook_id>/playbook.yaml
 #
+# 当前推荐写法是“行为树”：
+# - 用 `root` 描述主流程
+# - 用 `sequence` 表达“按顺序做，任一步失败就停”
+# - 用 `selector` 表达“按顺序尝试，任一路成功就停”
+# - 用 `condition` 表达“检查 / 判断”
+# - 用 `action` 表达“执行动作 / 恢复动作”
+# - 用 `call_playbook` 表达“调用另一个独立子 playbook”
+# - 用 `result` 表达“直接给出结论”
+#
 # 设计原则：
 # - 一个目录只放一个 playbook，避免多个故障流程混在一起
 # - playbook 负责“做什么”，规则文件负责“怎么判”
-# - 步骤优先使用 `assert_ref`，让后端去同目录的 `rules.yaml` 里找通用规则 id
-# - 如果某一步需要临时判断，也可以直接写 `assert`
+# - 默认优先用行为树，而不是旧的 `script + on_fail` 线性跳转
+# - 检查步骤尽量写成 `condition`
+# - 恢复步骤尽量写成 `action`
+# - “如果 A 不满足，就走 B” 这类逻辑优先写成 `selector`
+# - `call_playbook` 只用于切换到另一个独立子问题，不要拿它当普通跳转标签
 #
 # 字段说明：
 # - version：
@@ -22,269 +34,102 @@
 #   - playbook 的唯一标识。建议与目录名保持一致
 # - title：
 #   - 人类可读标题，展示在页面或日志中
+# - root：
+#   - 推荐写法，行为树根节点
 # - script：
-#   - 主执行步骤列表，按顺序执行
-# - success_criteria：
-#   - 最终验收步骤，用来确认问题是否真正恢复
-#   - 语义和 `script` 一样，也支持 `assert_ref` / `assert` / `require_confirmation` /
-#     `on_fail`
-#   - 它不是 `script` 的下一步，也不是普通流程分支，而是主流程结束后的最终检查
+#   - 旧兼容字段
+#   - 老 playbook 还可以继续使用，但新增 playbook 默认不要再写 `script`
 # - escalation_notes：
 #   - 需要转人工或升级时给出的提示说明
 # - execution_notes：
 #   - 执行时的补充说明、约束和上下文提示
 # - global_rules：
 #   - 这个 playbook 的全局约束列表，通常写成短句说明
-#   - 例如：只读排查优先、同一任务最多自动恢复一次、恢复失败后立即转人工
 #
-# 步骤字段说明：
+# 行为树节点类型：
+# - sequence：
+#   - 子节点按顺序执行
+#   - 遇到 `failure` 或 `running` 就停
+#   - 典型场景：先检查，再恢复，再复检
+# - selector：
+#   - 子节点按顺序尝试
+#   - 遇到 `success` 就停
+#   - 全部失败才返回 `failure`
+#   - 典型场景：优先判断是否已经正常，否则走恢复分支
+# - condition：
+#   - 叶子检查节点
+#   - 本质上还是“工具调用 + 断言”
+# - action：
+#   - 叶子动作节点
+#   - 本质上还是“工具调用 + 断言”
+# - call_playbook：
+#   - 调用另一个独立子 playbook
+#   - 子 playbook 成功后，当前树会继续往下执行
+#   - 子 playbook 失败时，当前节点返回失败
+# - result：
+#   - 不调用工具，直接返回结果
+#   - 常用来给出明确结论，例如“底盘目前没有收到速度指令”
+#
+# 叶子节点通用字段：
 # - name：
-#   - 步骤名称，建议写成能看出意图的名字
+#   - 节点名称，建议写成能看出意图的名字
 # - tool_name：
 #   - 后端工具名，只能从下面这些里选：
 #     - `ros_list_topics`
-#       - 输入：无
-#       - 输出：`items`
-#       - 含义：列出当前 ROS 环境中的所有 topic
 #     - `ros_list_services`
-#       - 输入：无
-#       - 输出：`items`
-#       - 含义：列出当前 ROS 环境中的所有 service
 #     - `ros_topic_info`
-#       - 输入：`name`
-#       - 输出：`name`, `output`
-#       - 含义：查看指定 topic 的连接信息、发布者和订阅者
 #     - `ros_topic_type`
-#       - 输入：`name`
-#       - 输出：`name`, `output`
-#       - 含义：查看指定 topic 的消息类型
 #     - `ros_message_definition`
-#       - 输入：`type_name`
-#       - 输出：`type_name`, `source_path`, `output`
-#       - 含义：查看 ROS 消息类型定义，并尽量展开嵌套字段
 #     - `ros_topic_echo`
-#       - 输入：`name`
-#       - 输出：`name`, `output`, `raw_output`
-#       - 含义：抓取一次 topic 样本消息，用于现场排查
 #     - `ros_service_info`
-#       - 输入：`name`
-#       - 输出：`name`, `output`
-#       - 含义：查看指定 service 的连接和节点信息
 #     - `ros_service_type`
-#       - 输入：`name`
-#       - 输出：`name`, `output`
-#       - 含义：查看指定 service 的服务类型
 #     - `ros_service_definition`
-#       - 输入：`type_name`
-#       - 输出：`type_name`, `source_path`, `output`
-#       - 含义：查看 ROS 服务类型定义，并尽量展开嵌套字段
 #     - `ros_service_call`
-#       - 输入：`name`, `request`
-#       - 输出：`name`, `request`, `output`
-#       - 含义：调用指定 ROS service，并返回执行结果
 #     - `ping_host`
-#       - 输入：`host`, `count`, `timeout_seconds`
-#       - 输出：`host`, `command`, `result`, `output`
-#       - 含义：从当前机器人侧 ping 指定主机，用于确认网络通信是否正常
 #     - `docker_compose_down_module`
-#       - 输入：`module_name`, `wait_seconds`
-#       - 输出：`module_name`, `project_root`, `command`, `result`, `output`
-#       - 含义：停止单个 docker compose 模块服务
 #     - `docker_compose_up_module`
-#       - 输入：`module_name`, `wait_seconds`
-#       - 输出：`module_name`, `project_root`, `command`, `result`, `output`, `wait_seconds`
-#       - 含义：启动单个 docker compose 模块服务，并默认等待一段时间让容器稳定
-#   - `result` 是命令执行结果对象时，通常会包含：
-#     - `exit_code`：退出码
-#     - `stdout`：标准输出
-#     - `stderr`：标准错误
-#     - `duration_seconds`：执行耗时
-#   - 只读排查优先选 `ros_list_topics`、`ros_list_services`、`ros_topic_info`、`ros_topic_type`、`ros_service_info`、`ros_service_type`
-#   - 需要看数据内容时优先选 `ros_topic_echo` 或 `ros_service_call`
-#   - 需要看消息或服务结构时优先选 `ros_message_definition`、`ros_service_definition`
-#   - 需要判断网络连通性时用 `ping_host`
-#   - 需要恢复容器服务时用 `docker_compose_down_module` 或 `docker_compose_up_module`
 # - arguments：
 #   - 传给工具的参数对象
-#   - 每个工具的参数写法如下：
-#     - `ros_list_topics`：无参数
-#     - `ros_list_services`：无参数
-#     - `ros_topic_info`：`name`
-#     - `ros_topic_type`：`name`
-#     - `ros_message_definition`：`type_name`
-#     - `ros_topic_echo`：`name`
-#     - `ros_service_info`：`name`
-#     - `ros_service_type`：`name`
-#     - `ros_service_definition`：`type_name`
-#     - `ros_service_call`：`name`, `request`
-#       - `request` 可以是字符串、数字、布尔值、对象或列表
-#     - `ping_host`：`host`, `count`, `timeout_seconds`
-#     - `docker_compose_down_module`：`module_name`, `wait_seconds`
-#     - `docker_compose_up_module`：`module_name`, `wait_seconds`
-#   - 需要做字段取值时，优先把真实字段放在 `arguments` 里，再交给规则引擎判断
-#   - 如果某个参数需要引用前面步骤或人工输入保存到上下文里的值，不要写死专名占位符
-#   - 推荐使用两种通用写法：
+#   - 如果参数要引用上下文，推荐：
 #     - `from_context`
-#       - 适合整个字段值直接来自上下文
-#       - 例如：
-#         `map_path:`
-#         `  from_context: target_map`
-#     - `{{ context_field }}`
-#       - 适合在字符串中内嵌上下文字段
-#       - 例如：
-#         `command: "echo {{ target_map }}"`
-#   - 代码层只负责按字段名取上下文，不应该认识 `map`、`file`、`path` 这些业务含义
+#     - `{{ context_field_name }}`
 # - assert_ref：
 #   - 引用同目录 `rules.yaml` 中的通用规则 id
 # - assert：
 #   - 直接内联写规则，不引用外部规则 id
+# - failure_message：
+#   - 当前节点失败时返回的人类可读说明
+# - success_message：
+#   - 当前节点成功时附带的人类可读说明
+# - wait_seconds：
+#   - 执行前等待多少秒，让现场状态稳定
+# - confirm_times：
+#   - 连续确认多少次都满足才算成功
+#
+# 人工确认字段：
 # - require_confirmation：
 #   - 是否需要人工确认后再继续执行
-#   - `true` 表示这一步需要确认后再做，常用于恢复动作
-#   - `false` 或不填表示不需要确认
 # - confirmation：
 #   - 人工确认 / 人工输入 / 人工选择的详细配置块
-#   - 不要把“怎么问用户、用户输入什么、输入结果怎么存”写死在代码里
-#   - 推荐把这类逻辑都写在 `confirmation` 里，让 playbook 自己描述
-#   - 常见场景：
-#     - 执行恢复动作前，请人工确认是否继续
-#     - 调 service 后返回多个候选值，请用户按序号选择
-#     - 需要用户补充一个文本、数字或布尔值，再继续后续步骤
-# - confirmation.mode：
-#   - 人工交互模式，可选值如下：
-#     - `approve`
-#       - 只需要人工确认“是否继续”
-#       - 典型输入是确认 / 取消
-#       - 典型输出是布尔值
-#     - `input`
-#       - 需要人工输入一个值
-#       - 典型输入是文本、数字、布尔值
-#       - 典型输出是用户输入的原始值或转换后的值
-#     - `select`
-#       - 需要人工从候选项中做选择
-#       - 典型输入是序号或选项值
-#       - 典型输出是选中的值、标签或序号
-# - confirmation.message：
-#   - 返回给前端展示的人类可读提示语
-#   - 例如：`即将执行重定位，是否继续？`
-#   - 例如：`请选择目标地图，你只要返回序号即可`
 # - confirmation.when：
-#   - 人工交互发生的时机
-#   - `before`：先问用户，再执行当前步骤
-#   - `after`：先执行当前工具，再根据工具输出问用户
-#   - `approve` 模式通常用 `before`
-#   - `select` 模式如果候选项来自工具输出，通常用 `after`
-# - confirmation.input：
-#   - 描述前端应该如何收集用户输入
-# - confirmation.input.type：
-#   - 输入类型，可选值如下：
-#     - `text`：自由文本
-#     - `number`：数值
-#     - `integer`：整数
-#     - `boolean`：布尔选择，例如是 / 否
-#     - `index`：按序号选择，常用于列表候选项
-# - confirmation.input.placeholder：
-#   - 前端输入框占位提示
-#   - 例如：`请输入序号`
-# - confirmation.input.label：
-#   - 输入框标签或短说明
-# - confirmation.input.help_text：
-#   - 输入补充说明
-#   - 例如：`请输入 1 到 5 之间的序号`
-# - confirmation.input.allow_empty：
-#   - 是否允许空输入
-#   - `true` 表示允许空输入
-#   - `false` 或不填表示不允许
-# - confirmation.input.auto_select_if_single：
-#   - 当候选项只有一个时，是否自动选中并继续
-#   - `true` 表示只有一个候选项时不再返回前端询问
-#   - 常用于 service 返回唯一地图名、唯一模块名、唯一机型等场景
-# - confirmation.input.options：
-#   - 候选项列表
-#   - 可直接写静态列表，也可以由运行时根据工具输出动态生成
-#   - 列表项支持两种写法：
-#     - 直接写字符串
-#     - 写成对象：`label`, `value`
-#   - 例如：
-#     - `- map_a`
-#     - `- label: 1. map_a`
-#       `  value: map_a`
-# - confirmation.input.options_source：
-#   - 候选项动态来源配置
-#   - 用于 `confirmation.when=after` 的场景
-#   - 典型流程是：先执行工具，再从工具输出里解析候选项，最后返回前端让用户选
-# - confirmation.input.options_source.field：
-#   - 从工具结果的哪个字段取值
-#   - 例如：`output`
-# - confirmation.input.options_source.parser：
-#   - 如何把字段值解析成候选项列表
-#   - 当前支持：
-#     - `string_list`：把字符串数组、JSON 数组、或 `xxx_list:` 下面的列表项解析成选项
-# - confirmation.input.options_source.list_key：
-#   - 当输出里有多个字段时，指定要从哪个列表字段读取
-#   - 例如：`map_name_list`
-# - confirmation.output：
-#   - 描述用户输入返回后，系统应该如何保存和传递这个值
+#   - `before`：先问用户，再执行当前节点
+#   - `after`：先执行工具，再根据工具输出问用户
+# - confirmation.mode：
+#   - `approve` / `input` / `select`
 # - confirmation.output.store_as：
-#   - 必填
-#   - 把确认结果保存到哪个上下文字段里
-#   - 例如：`target_map`
-#   - 例如：`approval_result`
-# - confirmation.output.type：
-#   - 输出值类型，可选值如下：
-#     - `raw_input`
-#       - 原样保存用户输入
-#     - `boolean`
-#       - 保存为布尔值
-#     - `selected_option_value`
-#       - 保存候选项里的 `value`
-#     - `selected_option_label`
-#       - 保存候选项里的 `label`
-#     - `selected_option_index`
-#       - 保存用户选中的序号
-#   - 如果不写，通常由运行时按 `mode` 做默认处理
-# - on_fail：
-#   - 当断言失败时的处理方式
+#   - 确认结果保存到哪个上下文字段里
 #
-# on_fail.action 可选值：
-# - stop：
-#   - 停止当前 playbook，不再继续执行
-# - escalate：
-#   - 升级给人工或更高层级处理
-# - call_playbook：
-#   - 跳转到另一个 playbook 继续处理
-# - on_fail.message：
-#   - 失败时给出的说明信息
-# - on_fail.playbook_id / on_fail.target_playbook_id：
-#   - 当 `action=call_playbook` 时，要跳转的子 playbook id
-#   - 两个字段都支持，建议优先写 `playbook_id`
-#
-# 兼容字段说明：
-# - expect：
-#   - 旧字段名，等价于 `assert_ref`
-#   - 新模板不推荐再使用，保留兼容即可
-#
-# 高级写法：
-# - field: "."：
-#   - 表示直接对整个 payload 进行判断
-#   - 适合规则要看完整结果对象时使用
-#
-# success_criteria 字段说明：
-# - 含义：
-#   - 主流程执行完之后，用来做最终验收
-#   - 每一项都要通过工具拿到结果，再交给规则引擎判断
-#   - 常用于确认“是否真的恢复”，而不是只看步骤有没有跑完
-# - wait_seconds：
-#   - 成功判定前先等待多少秒，让现场状态稳定
-# - confirm_times：
-#   - 连续确认多少次都满足才算最终成功
-# - on_fail：
-#   - 失败后的处理方式，和 `script` 中的 `on_fail` 含义一致
-# - on_fail.message：
-#   - 成功判定失败时给出的说明
-# - on_fail.playbook_id / on_fail.target_playbook_id：
-#   - 验收阶段通常不建议再跳转子 playbook
-#   - 如果真的需要保留兼容写法，也只作为历史兼容字段，不作为推荐写法
+# 行为树写法建议：
+# - “先看是否已正常，否则恢复”：
+#   - 用 `selector`
+# - “恢复之后还要继续后续检查”：
+#   - 在 `sequence` 里把恢复节点放在前面，后面继续接检查节点
+# - “有数据但全为 0，直接给出结论”：
+#   - 用 `selector`
+#   - 第一个子节点写“非全 0”的 `condition`
+#   - 第二个子节点写 `result`
+# - “这是另一个独立问题”：
+#   - 用 `call_playbook`
 #
 # 工具输入输出的完整说明请优先以这里的注释为准。
 # 如果新增工具，请先补充本模板注释，再改后端实现。
@@ -295,54 +140,55 @@ description: <playbook description>
 playbooks:
   - id: <playbook_id>
     title: <human readable title>
-    script:
-      - name: <step_name>
-        tool_name: <tool_name>
-        arguments:
-          key: value
-          # 如果参数要引用上下文，推荐：
-          # key:
-          #   from_context: <context field name>
-          # 或：
-          # key: "{{ context_field_name }}"
-        assert_ref: <rule_id>
-        require_confirmation: true
-        confirmation:
-          when: before | after
-          mode: approve | input | select
-          message: <human readable confirmation message>
-          input:
-            type: text | number | integer | boolean | index
-            placeholder: <input placeholder>
-            label: <input label>
-            help_text: <input help text>
-            allow_empty: false
-            auto_select_if_single: false
-            options:
-              - label: <option label>
-                value: <option value>
-            options_source:
-              field: <tool result field>
-              parser: string_list
-              list_key: <list field name>
-          output:
-            store_as: <context field name>
-            type: raw_input | boolean | selected_option_value | selected_option_label | selected_option_index
-        on_fail:
-          action: stop | escalate | call_playbook
-          message: <human readable message>
-          playbook_id: <child playbook id>
-    success_criteria:
-      - name: <final_check_name>
-        tool_name: <tool_name>
-        arguments:
-          key: value
-        assert_ref: <rule_id>
-        wait_seconds: 10
-        confirm_times: 3
-        on_fail:
-          action: stop | escalate
-          message: <human readable message>
+    root:
+      type: sequence | selector
+      name: <root_node_name>
+      children:
+        - type: condition | action
+          name: <node_name>
+          tool_name: <tool_name>
+          arguments:
+            key: value
+            # 如果参数要引用上下文，推荐：
+            # key:
+            #   from_context: <context field name>
+            # 或：
+            # key: "{{ context_field_name }}"
+          assert_ref: <rule_id>
+          failure_message: <human readable failure message>
+          success_message: <optional success message>
+          wait_seconds: 10
+          confirm_times: 3
+          require_confirmation: true
+          confirmation:
+            when: before | after
+            mode: approve | input | select
+            message: <human readable confirmation message>
+            input:
+              type: text | number | integer | boolean | index
+              placeholder: <input placeholder>
+              label: <input label>
+              help_text: <input help text>
+              allow_empty: false
+              auto_select_if_single: false
+              options:
+                - label: <option label>
+                  value: <option value>
+              options_source:
+                field: <tool result field>
+                parser: string_list
+                list_key: <list field name>
+            output:
+              store_as: <context field name>
+              type: raw_input | boolean | selected_option_value | selected_option_label | selected_option_index
+        - type: call_playbook
+          name: <call_node_name>
+          playbook_id: <child_playbook_id>
+          failure_message: <message when child playbook still fails>
+        - type: result
+          name: <result_node_name>
+          status: success | failure | running
+          message: <human readable result message>
     escalation_notes:
       - <human readable note>
     execution_notes:

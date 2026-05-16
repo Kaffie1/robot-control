@@ -1,0 +1,74 @@
+version: 1
+description: restart chassis when cmd_vel topic has no data
+
+playbooks:
+  - id: restart-chassis-when-cmd-vel-missing
+    title: 速度话题无数据时重启底盘
+    root:
+      type: sequence
+      name: restart_chassis_when_cmd_vel_missing
+      children:
+        - type: action
+          name: docker_compose_down_chassis
+          tool_name: docker_compose_down_module
+          arguments:
+            module_name: chassis
+            wait_seconds: 3
+          assert_ref: rule_3
+          require_confirmation: true
+          confirmation:
+            when: before
+            mode: approve
+            message: 即将重启 chassis 容器以恢复 /zj_humanoid/cmd_vel/calib，是否继续？
+            output:
+              store_as: chassis_restart_approved
+              type: boolean
+          failure_message: chassis 容器停止失败，请转相关人员继续处理
+        - type: action
+          name: docker_compose_up_chassis
+          tool_name: docker_compose_up_module
+          arguments:
+            module_name: chassis
+            wait_seconds: 10
+          assert_ref: rule_3
+          failure_message: chassis 容器启动失败，请转相关人员继续处理
+        - type: condition
+          name: check_cmd_vel_calib_has_data_after_restart
+          tool_name: ros_topic_echo
+          arguments:
+            name: /zj_humanoid/cmd_vel/calib
+          assert_ref: rule_1
+          failure_message: 重启 chassis 后 /zj_humanoid/cmd_vel/calib 仍然没有数据，请转底盘或系统同事继续排查
+        - type: selector
+          name: ensure_non_zero_cmd_vel_after_restart
+          children:
+            - type: condition
+              name: check_cmd_vel_calib_not_all_zero_after_restart
+              tool_name: ros_topic_echo
+              arguments:
+                name: /zj_humanoid/cmd_vel/calib
+              assert_ref: rule_2
+            - type: result
+              name: report_zero_velocity_after_restart
+              status: failure
+              message: 重启后 /zj_humanoid/cmd_vel/calib 有数据但全为 0，底盘目前没有收到速度指令
+        - type: condition
+          name: confirm_cmd_vel_calib_not_all_zero_after_restart
+          tool_name: ros_topic_echo
+          arguments:
+            name: /zj_humanoid/cmd_vel/calib
+          assert_ref: rule_2
+          confirm_times: 2
+          failure_message: 重启后速度话题需要连续确认不是全 0，当前还不能判定恢复完成
+    escalation_notes:
+      - "chassis 重启后 /zj_humanoid/cmd_vel/calib 仍然无数据时，继续检查 rosbridge、底盘容器日志和上游速度指令链路"
+      - "重启后如果话题有数据但持续全 0，直接返回底盘目前没有收到速度指令"
+    execution_notes:
+      - "这是由主 playbook 调用的子 playbook"
+      - "只有在 /zj_humanoid/cmd_vel/calib 无数据时才执行 chassis 重启"
+      - "恢复动作前需要人工确认，避免在现场误操作"
+
+global_rules:
+  - 先只读确认 topic 无数据，再执行恢复动作
+  - 同一任务中最多自动重启一次 chassis
+  - 恢复失败后立即转人工

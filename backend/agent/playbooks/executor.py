@@ -291,6 +291,14 @@ def step_passed(step: dict[str, Any]) -> bool:
     return bool(step.get("passed"))
 
 
+def child_playbook_passed(result: dict[str, Any]) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if bool(result.get("pending_confirmation")):
+        return False
+    return bool(result.get("passed"))
+
+
 def summarize_step_output(step: dict[str, Any]) -> str:
     if not isinstance(step, dict):
         return ""
@@ -413,6 +421,16 @@ def execute_playbook(
     playbook_source_path = str(playbook.get("source_path") or "").strip()
     playbook_rules_source_path = str(playbook.get("rules_source_path") or "").strip()
     validate_playbook_spec(playbook)
+    if isinstance(playbook.get("root"), dict):
+        from .bt_executor import execute_tree_playbook
+
+        return execute_tree_playbook(
+            playbook,
+            tool_context,
+            visited_ids=visited_ids,
+            depth=depth,
+            max_depth=max_depth,
+        )
     playbook_context = build_playbook_rule_context(
         {
             **dict(tool_context or {}),
@@ -449,6 +467,7 @@ def execute_playbook(
     steps: list[dict[str, Any]] = []
     observations: dict[str, bool | None] = {}
     recent_tasks: list[dict[str, Any]] = []
+    sub_playbooks: list[dict[str, Any]] = []
 
     for raw_step in script_steps:
         if not isinstance(raw_step, dict):
@@ -478,6 +497,8 @@ def execute_playbook(
                 "conclusion": str(confirmation_payload.get("message") or "等待人工确认"),
                 "next_action": "请根据提示补充输入后继续",
                 "recent_tasks": recent_tasks,
+                "sub_playbooks": sub_playbooks,
+                "sub_playbook": sub_playbooks[-1] if sub_playbooks else None,
                 "matched_context": playbook,
             }
         update_observations(observations, step)
@@ -521,15 +542,43 @@ def execute_playbook(
                 depth=depth + 1,
                 max_depth=max_depth,
             )
-            merged_observations = merge_observations(observations, child_result.get("observations"))
+            sub_playbooks.append(child_result)
+            step["sub_playbook"] = child_result
+            step["called_playbook_id"] = failure_playbook_id
+            observations = merge_observations(observations, child_result.get("observations"))
+            if bool(child_result.get("pending_confirmation")):
+                return {
+                    "playbook_id": playbook_id,
+                    "playbook_title": playbook_title,
+                    "executed": True,
+                    "steps": steps,
+                    "observations": observations,
+                    "pending_confirmation": True,
+                    "confirmation": child_result.get("confirmation"),
+                    "conclusion": child_result.get("conclusion") or failure_message or f"已转入子 playbook: {failure_playbook_id}",
+                    "next_action": child_result.get("next_action") or failure_message or f"请查看子 playbook: {failure_playbook_id}",
+                    "sub_playbooks": sub_playbooks,
+                    "sub_playbook": child_result,
+                    "recent_tasks": recent_tasks,
+                    "matched_context": playbook,
+                }
+            if child_playbook_passed(child_result):
+                step["passed"] = True
+                step["failure_action"] = ""
+                step["failure_message"] = ""
+                step["failure_playbook_id"] = ""
+                step["recovered_by_playbook"] = failure_playbook_id
+                update_observations(observations, step)
+                continue
             return {
                 "playbook_id": playbook_id,
                 "playbook_title": playbook_title,
                 "executed": True,
                 "steps": steps,
-                "observations": merged_observations,
+                "observations": observations,
                 "conclusion": child_result.get("conclusion") or failure_message or f"已转入子 playbook: {failure_playbook_id}",
                 "next_action": child_result.get("next_action") or failure_message or f"请查看子 playbook: {failure_playbook_id}",
+                "sub_playbooks": sub_playbooks,
                 "sub_playbook": child_result,
                 "recent_tasks": recent_tasks,
                 "matched_context": playbook,
@@ -549,6 +598,8 @@ def execute_playbook(
             "conclusion": failure_message or "脚本在当前步骤失败",
             "next_action": next_action,
             "recent_tasks": recent_tasks,
+            "sub_playbooks": sub_playbooks,
+            "sub_playbook": sub_playbooks[-1] if sub_playbooks else None,
             "matched_context": playbook,
         }
 
@@ -586,6 +637,8 @@ def execute_playbook(
                     "conclusion": str(confirmation_payload.get("message") or "等待人工确认"),
                     "next_action": "请根据提示补充输入后继续",
                     "recent_tasks": recent_tasks,
+                    "sub_playbooks": sub_playbooks,
+                    "sub_playbook": sub_playbooks[-1] if sub_playbooks else None,
                     "matched_context": playbook,
                 }
             if step_passed(criterion):
@@ -609,6 +662,8 @@ def execute_playbook(
                 "conclusion": failure_message or "脚本步骤已完成，但整体成功条件未满足",
                 "next_action": next_action,
                 "recent_tasks": recent_tasks,
+                "sub_playbooks": sub_playbooks,
+                "sub_playbook": sub_playbooks[-1] if sub_playbooks else None,
                 "matched_context": playbook,
             }
 
@@ -626,5 +681,7 @@ def execute_playbook(
         "conclusion": "playbook 执行完成" if final_passed else "playbook 执行完成，但仍有未通过的判定",
         "next_action": "继续观察当前状态" if final_passed else "查看未通过的步骤并继续处理",
         "recent_tasks": summarize_recent_tasks(recent_tasks),
+        "sub_playbooks": sub_playbooks,
+        "sub_playbook": sub_playbooks[-1] if sub_playbooks else None,
         "matched_context": playbook,
     }

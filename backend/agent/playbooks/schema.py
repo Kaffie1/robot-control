@@ -17,6 +17,7 @@ ALLOWED_CONFIRMATION_OUTPUT_TYPES = {
 }
 ALLOWED_CONFIRMATION_TIMINGS = {"before", "after"}
 ALLOWED_CONFIRMATION_OPTION_PARSERS = {"string_list"}
+ALLOWED_BT_NODE_TYPES = {"sequence", "selector", "condition", "action", "call_playbook", "result"}
 
 
 def validate_confirmation_spec(
@@ -108,40 +109,44 @@ def validate_playbook_spec(playbook: dict[str, Any]) -> None:
     if not playbook_id:
         raise ApiError("playbook 缺少 id")
 
+    root = playbook.get("root")
     script = playbook.get("script")
-    if not isinstance(script, list) or not script:
-        raise ApiError(f"playbook 缺少 script: {playbook_id}")
-    for index, raw_step in enumerate(script):
-        if not isinstance(raw_step, dict):
-            raise ApiError(f"脚本步骤格式错误: {playbook_id}[{index}]")
-        tool_name = str(raw_step.get("tool_name") or "").strip()
-        if not tool_name:
-            raise ApiError(f"脚本步骤缺少 tool_name: {playbook_id}[{index}]")
-        arguments = raw_step.get("arguments")
-        if arguments is not None and not isinstance(arguments, dict):
-            raise ApiError(f"脚本步骤 arguments 必须是对象: {playbook_id}[{index}]")
-        require_confirmation = raw_step.get("require_confirmation")
-        if require_confirmation is not None and not isinstance(require_confirmation, bool):
-            raise ApiError(f"脚本步骤 require_confirmation 必须是布尔值: {playbook_id}[{index}]")
-        confirmation = raw_step.get("confirmation")
-        if confirmation is not None:
-            validate_confirmation_spec(
-                confirmation,
-                playbook_id=playbook_id,
-                step_index=index,
-                location="脚本步骤",
-            )
-        on_fail = raw_step.get("on_fail")
-        if on_fail is not None:
-            if not isinstance(on_fail, dict):
-                raise ApiError(f"脚本步骤 on_fail 必须是对象: {playbook_id}[{index}]")
-            action = str(on_fail.get("action") or "").strip().lower()
-            if action and action not in ALLOWED_SCRIPT_FAILURE_ACTIONS:
-                raise ApiError(f"脚本步骤不支持的 on_fail.action: {action}")
-            if action == "call_playbook":
-                failure_playbook_id = str(on_fail.get("playbook_id") or on_fail.get("target_playbook_id") or "").strip()
-                if not failure_playbook_id:
-                    raise ApiError(f"脚本步骤 call_playbook 缺少 playbook_id: {playbook_id}[{index}]")
+    if isinstance(root, dict):
+        validate_bt_node_spec(root, playbook_id=playbook_id, path="root")
+    else:
+        if not isinstance(script, list) or not script:
+            raise ApiError(f"playbook 缺少 script: {playbook_id}")
+        for index, raw_step in enumerate(script):
+            if not isinstance(raw_step, dict):
+                raise ApiError(f"脚本步骤格式错误: {playbook_id}[{index}]")
+            tool_name = str(raw_step.get("tool_name") or "").strip()
+            if not tool_name:
+                raise ApiError(f"脚本步骤缺少 tool_name: {playbook_id}[{index}]")
+            arguments = raw_step.get("arguments")
+            if arguments is not None and not isinstance(arguments, dict):
+                raise ApiError(f"脚本步骤 arguments 必须是对象: {playbook_id}[{index}]")
+            require_confirmation = raw_step.get("require_confirmation")
+            if require_confirmation is not None and not isinstance(require_confirmation, bool):
+                raise ApiError(f"脚本步骤 require_confirmation 必须是布尔值: {playbook_id}[{index}]")
+            confirmation = raw_step.get("confirmation")
+            if confirmation is not None:
+                validate_confirmation_spec(
+                    confirmation,
+                    playbook_id=playbook_id,
+                    step_index=index,
+                    location="脚本步骤",
+                )
+            on_fail = raw_step.get("on_fail")
+            if on_fail is not None:
+                if not isinstance(on_fail, dict):
+                    raise ApiError(f"脚本步骤 on_fail 必须是对象: {playbook_id}[{index}]")
+                action = str(on_fail.get("action") or "").strip().lower()
+                if action and action not in ALLOWED_SCRIPT_FAILURE_ACTIONS:
+                    raise ApiError(f"脚本步骤不支持的 on_fail.action: {action}")
+                if action == "call_playbook":
+                    failure_playbook_id = str(on_fail.get("playbook_id") or on_fail.get("target_playbook_id") or "").strip()
+                    if not failure_playbook_id:
+                        raise ApiError(f"脚本步骤 call_playbook 缺少 playbook_id: {playbook_id}[{index}]")
 
     success_criteria = playbook.get("success_criteria")
     if success_criteria is not None and not isinstance(success_criteria, list):
@@ -175,3 +180,53 @@ def validate_playbook_spec(playbook: dict[str, Any]) -> None:
     for list_field in ("escalation_notes", "execution_notes", "global_rules"):
         if list_field in playbook and not isinstance(playbook.get(list_field), list):
             raise ApiError(f"{list_field} 必须是列表: {playbook_id}")
+
+
+def validate_bt_node_spec(
+    node: Any,
+    *,
+    playbook_id: str,
+    path: str,
+) -> None:
+    if not isinstance(node, dict):
+        raise ApiError(f"行为树节点必须是对象: {playbook_id}.{path}")
+    node_type = str(node.get("type") or "").strip().lower()
+    if not node_type:
+        raise ApiError(f"行为树节点缺少 type: {playbook_id}.{path}")
+    if node_type not in ALLOWED_BT_NODE_TYPES:
+        raise ApiError(f"行为树节点类型不支持: {node_type}")
+    if node_type in {"sequence", "selector"}:
+        children = node.get("children")
+        if not isinstance(children, list) or not children:
+            raise ApiError(f"组合节点缺少 children: {playbook_id}.{path}")
+        for index, child in enumerate(children):
+            validate_bt_node_spec(child, playbook_id=playbook_id, path=f"{path}.children[{index}]")
+        return
+    if node_type in {"condition", "action"}:
+        tool_name = str(node.get("tool_name") or "").strip()
+        if not tool_name:
+            raise ApiError(f"行为树叶子节点缺少 tool_name: {playbook_id}.{path}")
+        arguments = node.get("arguments")
+        if arguments is not None and not isinstance(arguments, dict):
+            raise ApiError(f"行为树叶子节点 arguments 必须是对象: {playbook_id}.{path}")
+        require_confirmation = node.get("require_confirmation")
+        if require_confirmation is not None and not isinstance(require_confirmation, bool):
+            raise ApiError(f"行为树叶子节点 require_confirmation 必须是布尔值: {playbook_id}.{path}")
+        confirmation = node.get("confirmation")
+        if confirmation is not None:
+            validate_confirmation_spec(
+                confirmation,
+                playbook_id=playbook_id,
+                step_index=0,
+                location=f"行为树节点 {path}",
+            )
+        return
+    if node_type == "call_playbook":
+        failure_playbook_id = str(node.get("playbook_id") or node.get("target_playbook_id") or "").strip()
+        if not failure_playbook_id:
+            raise ApiError(f"行为树 call_playbook 节点缺少 playbook_id: {playbook_id}.{path}")
+        return
+    if node_type == "result":
+        status = str(node.get("status") or "").strip().lower()
+        if status not in {"success", "failure", "running"}:
+            raise ApiError(f"行为树 result 节点缺少有效 status: {playbook_id}.{path}")

@@ -22,12 +22,6 @@ rules:
     value:
       from_context: target_map
 
-  rule_3:
-    # 通用规则 3：判断输出是否非空。
-    type: compare
-    field: output
-    op: not_empty
-
   rule_4:
     # 通用规则 4：判断 ROS service 调用是否成功。
     op: and

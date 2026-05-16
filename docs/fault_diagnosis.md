@@ -35,7 +35,7 @@
 
 这个案例对应的 playbook 位于 `config/fault_playbooks/no-localization/playbook.yaml`。
 
-对应的执行思路已经写成脚本化 playbook：先查 `/livox/lidar`，如果用户没提供地图名就先追问“请问定位的地图叫什么名字”，再通过 service 确认地图列表里有这个目标地图，然后执行 `/zj_humanoid/perception/reloc`，最后继续看 `/zj_humanoid/navigation/odom_info`。
+对应的执行思路已经写成脚本化 playbook：先查 `/livox/lidar`，如果用户没提供地图名就先追问“请问定位的地图叫什么名字”，再通过 service 确认地图列表里有这个目标地图，然后直接执行 `/zj_humanoid/perception/reloc`，成功后等待 10 秒，再继续看 `/zj_humanoid/navigation/odom_info`。
 
 如果某一步本身又是另一个独立问题，就让脚本通过 `on_fail.action: call_playbook` 跳到对应的子 playbook，而不是把两个问题硬写进一条线里。
 
