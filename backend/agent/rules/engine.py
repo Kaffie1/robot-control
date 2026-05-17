@@ -13,7 +13,7 @@ from typing import Any
 import yaml
 
 from ...config import FAULT_PLAYBOOK_RULES_FILENAME
-from ...models import ApiError
+from ...errors import ApiError
 from ..common import expand_context_references
 from .schema import validate_rule_catalog, validate_rule_spec
 

@@ -10,7 +10,7 @@ from ...config import (
     OPENAI_ENABLE_REASONING_SPLIT,
     OPENAI_THINK,
 )
-from ...models import ApiError
+from ...errors import ApiError
 
 
 def load_chat_message_classes() -> tuple[Any, Any, Any]:

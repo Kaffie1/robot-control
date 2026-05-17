@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -f backend/robot.py backend/ros_ops.py backend/runtime.py backend/services.py backend/stores.py backend/utils.py backend/config.py backend/models.py)",
+      "Bash(python3 -c \"from backend.agent.playbooks import bt_executor; print\\('bt_executor OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('backend/api.py'\\).read\\(\\)\\); print\\('api.py syntax OK'\\)\")",
+      "Bash(chmod +x service.sh)",
+      "Bash(cat /Users/wanghusen/.chat_playbook_runtime/app.log)",
+      "Read(//Users/wanghusen/.chat_playbook_runtime/**)",
+      "Bash(./service.sh restart *)",
+      "Bash(ls -la /Users/wanghusen/Desktop/code/robot_control/)",
+      "Read(//Users/wanghusen/Desktop/code/**)",
+      "Bash(cp /Users/wanghusen/Desktop/code/robot-control/templates/index.html /Users/wanghusen/Desktop/code/chat_playbook/templates/index.html)"
+    ],
+    "additionalDirectories": [
+      "/Users/wanghusen/Desktop/code/chat_playbook/backend",
+      "/Users/wanghusen/Desktop/code/robot-control/templates"
+    ]
+  }
+}

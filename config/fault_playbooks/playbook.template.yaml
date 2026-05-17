@@ -75,19 +75,6 @@
 #   - 节点名称，建议写成能看出意图的名字
 # - tool_name：
 #   - 后端工具名，只能从下面这些里选：
-#     - `ros_list_topics`
-#     - `ros_list_services`
-#     - `ros_topic_info`
-#     - `ros_topic_type`
-#     - `ros_message_definition`
-#     - `ros_topic_echo`
-#     - `ros_service_info`
-#     - `ros_service_type`
-#     - `ros_service_definition`
-#     - `ros_service_call`
-#     - `ping_host`
-#     - `docker_compose_down_module`
-#     - `docker_compose_up_module`
 # - arguments：
 #   - 传给工具的参数对象
 #   - 如果参数要引用上下文，推荐：
@@ -114,10 +101,14 @@
 # - confirmation.when：
 #   - `before`：先问用户，再执行当前节点
 #   - `after`：先执行工具，再根据工具输出问用户
+#   - 当前后端实际只支持 `before`
 # - confirmation.mode：
 #   - `approve` / `input` / `select`
 # - confirmation.output.store_as：
 #   - 确认结果保存到哪个上下文字段里
+# - continuation：
+#   - 确认中断后，后端会返回 `continuation`
+#   - 前端下一次 `/api/chat` 需要把这个对象原样带回
 #
 # 行为树写法建议：
 # - “先看是否已正常，否则恢复”：
@@ -178,6 +169,7 @@ playbooks:
                 field: <tool result field>
                 parser: string_list
                 list_key: <list field name>
+              # 当前后端实际只支持静态 options，不支持 options_source
             output:
               store_as: <context field name>
               type: raw_input | boolean | selected_option_value | selected_option_label | selected_option_index

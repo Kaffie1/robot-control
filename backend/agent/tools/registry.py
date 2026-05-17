@@ -1,134 +1,164 @@
 from __future__ import annotations
 
-import json
-from typing import Any, Callable
+from typing import Any
 
 from pydantic import BaseModel
+from pydantic import ConfigDict
 
-from ...models import ApiError
+from ...errors import ApiError
 from ..common import append_fault_trace, logger
-from .runtime import (
-    AgentToolDefinition,
-    DockerComposeModuleArgs,
-    PingHostArgs,
-    RosNameArgs,
-    RosServiceCallArgs,
-    RosTypeNameArgs,
-    handle_docker_compose_down_module,
-    handle_docker_compose_up_module,
-    handle_ping_host,
-    handle_ros_list_services,
-    handle_ros_list_topics,
-    handle_ros_message_definition,
-    handle_ros_service_call,
-    handle_ros_service_definition,
-    handle_ros_service_info,
-    handle_ros_service_type,
-    handle_ros_topic_echo,
-    handle_ros_topic_info,
-    handle_ros_topic_type,
-)
+from .runtime import AgentToolDefinition
 
 
 class EmptyArgs(BaseModel):
     pass
 
 
+class RobotArgs(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    robot_id: str | None = None
+
+
+class ApprovalArgs(RobotArgs):
+    operator_approved: bool | None = None
+
+
+class RelocalizationArgs(RobotArgs):
+    map_name: str | None = None
+    force: bool | None = None
+
+
+class RecoveryZoneArgs(RobotArgs):
+    recovery_zone: str | None = None
+
+
+def _mock_check_localization(payload: RobotArgs, tool_context: dict[str, Any] | None) -> dict[str, Any]:
+    context = dict(tool_context or {})
+    localized = bool(context.get("operator_approved") and context.get("map_name") and context.get("recovery_zone"))
+    return {
+        "localized": localized,
+        "robot_id": payload.robot_id,
+        "source": "mock",
+    }
+
+
+def _mock_record_operator_approval(payload: ApprovalArgs, tool_context: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        "accepted": bool(payload.operator_approved),
+        "robot_id": payload.robot_id,
+        "source": "mock",
+    }
+
+
+def _mock_trigger_relocalization(payload: RelocalizationArgs, tool_context: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        "accepted": bool(payload.map_name),
+        "robot_id": payload.robot_id,
+        "map_name": payload.map_name,
+        "force": bool(payload.force),
+        "source": "mock",
+    }
+
+
+def _mock_set_recovery_zone(payload: RecoveryZoneArgs, tool_context: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        "accepted": bool(payload.recovery_zone),
+        "robot_id": payload.robot_id,
+        "zone": payload.recovery_zone,
+        "expected_zone": payload.recovery_zone,
+        "source": "mock",
+    }
+
+
+def _mock_check_localization_detail(payload: RobotArgs, tool_context: dict[str, Any] | None) -> dict[str, Any]:
+    import time
+
+    return {
+        "robot_id": payload.robot_id,
+        "pose_timestamp": time.time(),
+        "message": "pose timestamp ok",
+        "source": "mock",
+    }
+
+
+def _mock_check_localization_quality(payload: RobotArgs, tool_context: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        "robot_id": payload.robot_id,
+        "score": 88,
+        "message": "quality ok",
+        "source": "mock",
+    }
+
+
+def _mock_diagnose_robot_status(payload: RobotArgs, tool_context: dict[str, Any] | None) -> dict[str, Any]:
+    context = dict(tool_context or {})
+    return {
+        "robot_id": payload.robot_id,
+        "localized": bool(context.get("operator_approved") and context.get("map_name") and context.get("recovery_zone")),
+        "map_name": context.get("map_name"),
+        "recovery_zone": context.get("recovery_zone"),
+        "status": "needs_recovery" if not context.get("recovery_zone") else "ready",
+        "summary": "mock diagnose result",
+        "source": "mock",
+    }
+
+
+MOCK_TOOL_DEFINITIONS = [
+    AgentToolDefinition(
+        name="check_localization",
+        description="Mock localization state checker.",
+        args_schema=RobotArgs,
+        handler=_mock_check_localization,
+    ),
+    AgentToolDefinition(
+        name="record_operator_approval",
+        description="Mock operator approval recorder.",
+        args_schema=ApprovalArgs,
+        handler=_mock_record_operator_approval,
+    ),
+    AgentToolDefinition(
+        name="trigger_relocalization",
+        description="Mock relocalization trigger.",
+        args_schema=RelocalizationArgs,
+        handler=_mock_trigger_relocalization,
+    ),
+    AgentToolDefinition(
+        name="set_recovery_zone",
+        description="Mock recovery zone setter.",
+        args_schema=RecoveryZoneArgs,
+        handler=_mock_set_recovery_zone,
+    ),
+    AgentToolDefinition(
+        name="check_localization_detail",
+        description="Mock localization detail checker.",
+        args_schema=RobotArgs,
+        handler=_mock_check_localization_detail,
+    ),
+    AgentToolDefinition(
+        name="check_localization_quality",
+        description="Mock localization quality checker.",
+        args_schema=RobotArgs,
+        handler=_mock_check_localization_quality,
+    ),
+    AgentToolDefinition(
+        name="diagnose_robot_status",
+        description="Mock robot status diagnostic tool.",
+        args_schema=RobotArgs,
+        handler=_mock_diagnose_robot_status,
+    ),
+]
+
+
 class AgentToolRegistry:
     def __init__(self) -> None:
-        self._definitions = [
-            AgentToolDefinition(
-                name="ros_list_topics",
-                description="列出当前 ROS 环境中的所有 topic。",
-                args_schema=EmptyArgs,
-                handler=handle_ros_list_topics,
-            ),
-            AgentToolDefinition(
-                name="ros_list_services",
-                description="列出当前 ROS 环境中的所有 service。",
-                args_schema=EmptyArgs,
-                handler=handle_ros_list_services,
-            ),
-            AgentToolDefinition(
-                name="ros_topic_info",
-                description="查看指定 topic 的连接信息、发布者和订阅者。",
-                args_schema=RosNameArgs,
-                handler=handle_ros_topic_info,
-            ),
-            AgentToolDefinition(
-                name="ros_topic_type",
-                description="查看指定 topic 的消息类型。",
-                args_schema=RosNameArgs,
-                handler=handle_ros_topic_type,
-            ),
-            AgentToolDefinition(
-                name="ros_message_definition",
-                description="查看 ROS 消息类型定义，并尽量展开嵌套字段。",
-                args_schema=RosTypeNameArgs,
-                handler=handle_ros_message_definition,
-            ),
-            AgentToolDefinition(
-                name="ros_topic_echo",
-                description="抓取一次 topic 样本消息，用于现场排查。",
-                args_schema=RosNameArgs,
-                handler=handle_ros_topic_echo,
-            ),
-            AgentToolDefinition(
-                name="ros_service_info",
-                description="查看指定 service 的连接和节点信息。",
-                args_schema=RosNameArgs,
-                handler=handle_ros_service_info,
-            ),
-            AgentToolDefinition(
-                name="ros_service_type",
-                description="查看指定 service 的服务类型。",
-                args_schema=RosNameArgs,
-                handler=handle_ros_service_type,
-            ),
-            AgentToolDefinition(
-                name="ros_service_definition",
-                description="查看 ROS 服务类型定义，并尽量展开嵌套字段。",
-                args_schema=RosTypeNameArgs,
-                handler=handle_ros_service_definition,
-            ),
-            AgentToolDefinition(
-                name="ros_service_call",
-                description="调用指定 ROS service，并返回执行结果。",
-                args_schema=RosServiceCallArgs,
-                handler=handle_ros_service_call,
-            ),
-            AgentToolDefinition(
-                name="ping_host",
-                description="从当前机器人侧 ping 指定主机，用于确认网络通信是否正常。",
-                args_schema=PingHostArgs,
-                handler=handle_ping_host,
-            ),
-            AgentToolDefinition(
-                name="docker_compose_down_module",
-                description="停止单个 docker compose 模块服务。",
-                args_schema=DockerComposeModuleArgs,
-                handler=handle_docker_compose_down_module,
-            ),
-            AgentToolDefinition(
-                name="docker_compose_up_module",
-                description="启动单个 docker compose 模块服务，并默认等待一段时间让容器稳定。",
-                args_schema=DockerComposeModuleArgs,
-                handler=handle_docker_compose_up_module,
-            ),
-        ]
+        self._definitions: list[AgentToolDefinition] = list(MOCK_TOOL_DEFINITIONS)
         self._by_name = {item.name: item for item in self._definitions}
 
-    def list_definitions(self) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        for definition in self._definitions:
-            items.append(
-                {
-                    "name": definition.name,
-                    "description": definition.description,
-                    "input_schema": definition.args_schema.model_json_schema(),
-                }
-            )
-        return items
+    def count(self) -> int:
+        return len(self._definitions)
+
+    def list_tool_names(self) -> list[str]:
+        return [item.name for item in self._definitions]
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None, tool_context: dict[str, Any] | None = None) -> dict[str, Any]:
         definition = self._by_name.get(str(name or "").strip())
@@ -153,28 +183,5 @@ class AgentToolRegistry:
             },
         )
         return result
-
-    def build_langchain_tools(self, tool_context: dict[str, Any] | None = None) -> list[Any]:
-        from langchain_core.tools import StructuredTool
-
-        tools = []
-        for definition in self._definitions:
-            def make_tool_handler(current_name: str) -> Callable[..., str]:
-                def tool_handler(**kwargs: Any) -> str:
-                    result = self.call_tool(current_name, kwargs, tool_context)
-                    return json.dumps(result, ensure_ascii=False)
-
-                return tool_handler
-
-            tools.append(
-                StructuredTool.from_function(
-                    func=make_tool_handler(definition.name),
-                    name=definition.name,
-                    description=definition.description,
-                    args_schema=definition.args_schema,
-                )
-            )
-        return tools
-
 
 agent_tool_registry = AgentToolRegistry()

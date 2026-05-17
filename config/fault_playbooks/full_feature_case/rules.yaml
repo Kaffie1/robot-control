@@ -1,0 +1,48 @@
+version: 1
+description: 全要素示例规则
+
+rules:
+  rule_localized:
+    type: compare
+    field: result.localized
+    op: boolean_true
+
+  rule_relocalize_triggered:
+    type: compare
+    field: result.accepted
+    op: boolean_true
+
+  rule_pose_recent:
+    type: compare
+    field: result.pose_timestamp
+    op: timestamp_recent
+    within_seconds: 10
+
+  rule_quality_not_error:
+    op: and
+    conditions:
+      - type: compare
+        field: result.message
+        op: not_empty
+      - type: compare
+        field: result.message
+        op: not_contains
+        value: ERROR
+
+  rule_match_selected_zone:
+    type: compare
+    field: result.zone
+    op: equals
+    value_field: result.expected_zone
+
+  rule_extract_numeric_score:
+    type: compare
+    field: output
+    op: greater_or_equal
+    value: 80
+    cast: number
+    extract:
+      type: regex
+      pattern: "score=(\\d+)"
+      group: 1
+      ignore_case: true

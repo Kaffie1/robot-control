@@ -1,1079 +1,254 @@
-import json
-import io
-import os
-import posixpath
-import re
-import threading
+"""Minimal API for agent-only mode."""
+
+import asyncio
 import traceback
-import zipfile
 from contextlib import asynccontextmanager
-from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .agent.tools import agent_tool_registry
-from .config import (
-    DEPLOY_CONFIG_PATH,
-    MAX_TASK_ITEMS,
-    MODULE_DEPLOY_ROOT,
-    SESSION_CLEANUP_INTERVAL_SECONDS,
-    SESSION_COOKIE,
-    SESSION_IDLE_TIMEOUT_SECONDS,
-    STATIC_DIR,
-)
-from .agent.common import append_chat_history_turn, delete_chat_history_file, get_chat_history, reset_chat_state
-from .agent.conversation import invoke_chat_model
-from .models import AgentToolCallPayload, ApiError, ChatRequestPayload, ConnectPayload, ConnectionConfig, ExecutePayload, InstallDebPayload, RosServiceCallPayload, RosTopicPublishPayload
-from .runtime import connection_cache_store, deploy_config_store, history_store, session_store, task_manager, templates, upload_progress_manager
-from .ros_ops import (
-    ros_list_services,
-    ros_list_topics,
-    ros_message_definition,
-    ros_service_call,
-    ros_service_definition_by_name,
-    ros_service_info,
-    ros_service_type,
-    ros_topic_echo,
-    ros_topic_info,
-    ros_topic_publish,
-    ros_topic_type,
-)
-from .services import (
-    build_file_replace_history,
-    create_package_target_client,
-    create_deploy_runner,
-    create_history_rollback_runner,
-    create_module_deploy_runner,
-    current_robot_password,
-    ensure_client_connected,
-    refresh_remote_shortcuts,
-    resolve_deploy_target,
-)
-from .utils import get_asset_version, parse_bool, prepare_package_bytes, render_remote_command, require_text, require_upload, resolve_download_source_path
+# Load .env file
+_dotenv_path = Path(__file__).parent.parent / ".env"
+load_dotenv(dotenv_path=_dotenv_path)
+
+from .agent.orchestration import run_fault_chat_graph
+from .agent.orchestration.live_playbook_state import build_matched_playbook_payload_by_id
+from .agent.orchestration.live_playbook_state import clear_live_playbook_state, get_live_playbook_state, reset_live_playbook_execution, stream_live_playbook_events
+from .agent.orchestration.router_nodes import load_catalog_node, resolve_playbook_route
+from .config import APP_HOST, APP_PORT, STATIC_DIR, TEMPLATES_DIR
+from .errors import ApiError
+from .utils import get_fault_logger
+
+logger_ = get_fault_logger()
+
+
+def _build_asset_version(*paths: Path) -> str:
+    import hashlib
+
+    digest = hashlib.md5()
+    for path in paths:
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            continue
+    return digest.hexdigest()[:10]
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    stop_event = threading.Event()
-
-    def cleanup_loop() -> None:
-        while not stop_event.wait(SESSION_CLEANUP_INTERVAL_SECONDS):
-            session_store.cleanup_expired(SESSION_IDLE_TIMEOUT_SECONDS)
-
-    cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
-    cleanup_thread.start()
-    try:
-        yield
-    finally:
-        stop_event.set()
-        cleanup_thread.join(timeout=1)
-        session_store.close_all()
+    yield
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Robot Upgrade Console", lifespan=lifespan)
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-    gz_log_name_pattern = re.compile(
-        r"^(?P<stamp>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(?:-\d{1,6})?)\..*\.gz$",
-        re.IGNORECASE,
-    )
-
-    def resolve_log_filter_timestamp(entry: dict[str, Any]) -> int:
-        name = str(entry.get("name") or "").strip()
-        if name.lower().endswith(".gz"):
-            match = gz_log_name_pattern.match(name)
-            if match:
-                stamp = match.group("stamp")
-                for fmt in ("%Y-%m-%d_%H-%M-%S-%f", "%Y-%m-%d_%H-%M-%S"):
-                    try:
-                        return int(datetime.strptime(stamp, fmt).timestamp())
-                    except ValueError:
-                        continue
-        created_at = int(entry.get("created_at") or 0)
-        if created_at <= 0:
-            raise ApiError(f"日志文件缺少可用创建时间，无法筛选: {str(entry.get('path') or name).strip()}")
-        return created_at
-
-    def build_unique_deploy_filename(file_name: str, *, reason: str = "retry") -> str:
-        base_name = os.path.basename(str(file_name or "").strip())
-        if not base_name:
-            raise ApiError("文件名不能为空")
-        stem, suffix = os.path.splitext(base_name)
-        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        return f"{stem}_{reason}_{stamp}{suffix}"
-
-    def is_reusable_existing_remote_package(client, remote_path: str, expected_username: str) -> tuple[bool, dict[str, Any]]:
-        if not client.path_exists(remote_path):
-            return False, {"exists": False}
-        try:
-            owner = client.get_remote_file_owner(remote_path)
-        except Exception as exc:  # noqa: BLE001
-            return False, {"exists": True, "error": str(exc)}
-        normalized_owner = str(owner or "").strip()
-        normalized_expected = str(expected_username or "").strip()
-        reusable = bool(normalized_owner and normalized_owner == normalized_expected)
-        return reusable, {
-            "exists": True,
-            "owner": normalized_owner,
-            "expected_owner": normalized_expected,
-            "reusable": reusable,
-        }
-
-    def collect_log_files(
-        *,
-        client,
-        root: str,
-        module_names: str,
-        start_at: str,
-        end_at: str,
-    ) -> tuple[str, set[str], list[dict[str, Any]]]:
-        resolved_root = client.resolve_remote_path(root)
-        files = client.list_files_recursive(resolved_root, require_birth_time=False)
-        selected_modules = {
-            item.strip()
-            for item in str(module_names or "").split(",")
-            if item.strip()
-        }
-        if selected_modules:
-            files = [
-                entry
-                for entry in files
-                if str(entry.get("relative_path") or "").split("/", 1)[0] in selected_modules
-            ]
-        start_ts = None
-        end_ts = None
-        if str(start_at or "").strip():
-            start_ts = int(datetime.strptime(start_at, "%Y-%m-%d %H:%M:%S").timestamp())
-        if str(end_at or "").strip():
-            end_ts = int(datetime.strptime(end_at, "%Y-%m-%d %H:%M:%S").timestamp())
-        for entry in files:
-            entry["filter_timestamp"] = resolve_log_filter_timestamp(entry)
-        if start_ts is not None:
-            files = [entry for entry in files if int(entry.get("filter_timestamp") or 0) >= start_ts]
-        if end_ts is not None:
-            files = [entry for entry in files if int(entry.get("filter_timestamp") or 0) <= end_ts]
-        return resolved_root, selected_modules, files
-
-    def build_log_archive_name(device_type: str, start_at: str, end_at: str) -> str:
-        prefix = str(device_type or "log").strip().lower() or "log"
-        start_label = datetime.strptime(start_at, "%Y-%m-%d %H:%M:%S").strftime("%m%d%H%M")
-        end_label = datetime.strptime(end_at, "%Y-%m-%d %H:%M:%S").strftime("%m%d%H%M")
-        return f"{prefix}-{start_label}-{end_label}.zip"
-
-    def parse_machine_options_from_output(output: str) -> list[dict[str, str]]:
-        normalized = str(output or "").replace("\r", "\n")
-        try:
-            parsed = json.loads(normalized)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, list):
-            candidates = [str(item or "").strip() for item in parsed if str(item or "").strip()]
-        else:
-            candidates = [
-                item.strip().strip("[]\"'")
-                for chunk in normalized.splitlines()
-                for item in chunk.split(",")
-                if item.strip().strip("[]\"'")
-            ]
-        seen: set[str] = set()
-        options: list[dict[str, str]] = []
-        for item in candidates:
-            if item in seen:
-                continue
-            seen.add(item)
-            options.append({"value": item, "label": item})
-        if options:
-            return options
-        return [
-            {"value": "WA1", "label": "WA1"},
-            {"value": "WA2", "label": "WA2"},
-            {"value": "I2", "label": "I2"},
-        ]
-
-    @app.middleware("http")
-    async def attach_session(request: Request, call_next):
-        sid = request.cookies.get(SESSION_COOKIE)
-        sid, session, is_new = session_store.get_or_create(sid)
-        session_store.touch(sid)
-        request.state.session_id = sid
-        request.state.session = session
-        response = await call_next(request)
-        if is_new:
-            response.set_cookie(SESSION_COOKIE, sid, path="/", httponly=True, samesite="lax")
-        return response
+    app = FastAPI(title="Agent Console", lifespan=lifespan)
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.exception_handler(ApiError)
     async def handle_api_error(request: Request, exc: ApiError):
-        if request.url.path.startswith("/api/"):
-            return JSONResponse(status_code=exc.status_code, content={"ok": False, "error": exc.message, **exc.payload})
-        return PlainTextResponse(exc.message, status_code=exc.status_code)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"ok": False, "error": exc.message, **exc.payload}
+        )
 
     @app.exception_handler(RequestValidationError)
-    async def handle_validation_error(request: Request, exc: RequestValidationError):
+    async def handle_validation_error(request: Request, exc):
         errors = exc.errors()
         message = errors[0].get("msg", "请求参数无效") if errors else "请求参数无效"
-        if request.url.path.startswith("/api/"):
-            return JSONResponse(status_code=400, content={"ok": False, "error": message})
-        return PlainTextResponse(message, status_code=400)
+        return JSONResponse(status_code=400, content={"ok": False, "error": message})
 
     @app.exception_handler(StarletteHTTPException)
     async def handle_http_error(request: Request, exc: StarletteHTTPException):
-        if request.url.path.startswith("/api/"):
-            return JSONResponse(status_code=exc.status_code, content={"ok": False, "error": str(exc.detail)})
-        return PlainTextResponse(str(exc.detail), status_code=exc.status_code)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"ok": False, "error": str(exc.detail)}
+        )
 
     @app.exception_handler(Exception)
     async def handle_unexpected_error(request: Request, exc: Exception):
         traceback.print_exc()
-        if request.url.path.startswith("/api/"):
-            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
-        return PlainTextResponse(str(exc), status_code=500)
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
-    def get_session(request: Request) -> dict[str, Any]:
-        return request.state.session
-
-    def get_session_id(request: Request) -> str:
-        return str(request.state.session_id or "")
+    templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
-        session = get_session(request)
-        return templates.TemplateResponse(
+        asset_version = _build_asset_version(
+            Path(STATIC_DIR) / "js" / "chat.js",
+            Path(STATIC_DIR) / "css" / "chat.css",
+            Path(TEMPLATES_DIR) / "index.html",
+        )
+        response = templates.TemplateResponse(
             request=request,
             name="index.html",
             context={
                 "request": request,
-                "defaults": session["last_config"],
-                "connected": session["client"].connected,
-                "saved_connections": connection_cache_store.list_entries(),
-                "package_machine_options": deploy_config_store.get_machine_options("package"),
-                "module_machine_options": deploy_config_store.get_machine_options("module"),
-                "asset_version": get_asset_version(),
+                "defaults": {},
+                "connected": False,
+                "saved_connections": [],
+                "package_machine_options": [],
+                "module_machine_options": [],
+                "asset_version": asset_version,
             },
         )
-
-    @app.get("/api/status")
-    def api_status(request: Request):
-        session = get_session(request)
-        if session["client"].connected and not session.get("remote_shortcuts"):
-            refresh_remote_shortcuts(session)
-        return {
-            "ok": True,
-            "session_id": get_session_id(request),
-            "connected": session["client"].connected,
-            "last_config": session["last_config"],
-            "last_remote_deb_path": session["last_remote_deb_path"],
-            "remote_shortcuts": session.get("remote_shortcuts", []),
-            "preferred_root": session.get("preferred_root", "/"),
-            "saved_connections": connection_cache_store.list_entries(),
-            "package_machine_options": deploy_config_store.get_machine_options("package"),
-            "module_machine_options": deploy_config_store.get_machine_options("module"),
-        }
-
-    @app.post("/api/connect")
-    def api_connect(payload: ConnectPayload, request: Request):
-        session = get_session(request)
-        host = require_text(payload.host, "主机不能为空")
-        username = require_text(payload.username, "用户名不能为空")
-        password = str(payload.password or "")
-        pico_host = str(payload.pico_host or "").strip()
-        pico_username = str(payload.pico_username or "").strip()
-        pico_password = str(payload.pico_password or "")
-        if not password:
-            raise ApiError("请填写密码")
-        config = ConnectionConfig(host=host, port=int(payload.port), username=username, password=password)
-        session["client"].connect(config)
-        session["last_config"] = {
-            "host": host,
-            "port": int(payload.port),
-            "username": username,
-            "pico_host": pico_host,
-            "pico_port": int(payload.pico_port),
-            "pico_username": pico_username,
-        }
-        session["ssh_auth"] = {"username": username, "password": password}
-        session["processor_auth"] = {
-            "ORIN": {"host": host, "port": int(payload.port), "username": username, "password": password},
-            "PICO": {"host": pico_host, "port": int(payload.pico_port), "username": pico_username, "password": pico_password},
-        }
-        saved_connections = connection_cache_store.remember(
-            {
-                "host": host,
-                "port": int(payload.port),
-                "username": username,
-                "password": password,
-                "pico_host": pico_host,
-                "pico_port": int(payload.pico_port),
-                "pico_username": pico_username,
-                "pico_password": pico_password,
-            }
-        )
-        shortcut_payload = refresh_remote_shortcuts(session)
-        return {"ok": True, "message": "连接成功", "remote_shortcuts": shortcut_payload["shortcuts"], "preferred_root": shortcut_payload["preferred_root"], "saved_connections": saved_connections}
-
-    @app.post("/api/disconnect")
-    def api_disconnect(request: Request):
-        session = get_session(request)
-        session["client"].close()
-        session["remote_shortcuts"] = []
-        session["preferred_root"] = "/"
-        tool_context = {"session": session}
-        reset_chat_state(tool_context)
-        delete_chat_history_file(tool_context)
-        session["ssh_auth"] = {"username": str(session["last_config"].get("username") or ""), "password": ""}
-        session["processor_auth"] = {
-            "ORIN": {
-                "host": str(session["last_config"].get("host") or ""),
-                "port": int(session["last_config"].get("port") or 22),
-                "username": str(session["last_config"].get("username") or ""),
-                "password": "",
-            },
-            "PICO": {
-                "host": str(session["last_config"].get("pico_host") or ""),
-                "port": int(session["last_config"].get("pico_port") or 22),
-                "username": str(session["last_config"].get("pico_username") or ""),
-                "password": "",
-            },
-        }
-        return {"ok": True, "message": "已断开连接"}
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
     @app.post("/api/chat")
-    def api_chat(payload: ChatRequestPayload, request: Request):
-        session = get_session(request)
-        last_config = session.get("last_config") or {}
-        tool_context = {"session": session}
-        result = invoke_chat_model(
-            payload.message,
+    async def api_chat(request: Request):
+        body = await request.json()
+        # 用户当前的输入
+        message = str(body.get("message") or "").strip()
+        # 继续执行的上下文
+        continuation = body.get("continuation")
+        # 前端的对话历史，用于提供给模型参考，帮助模型更好地理解上下文
+        history = body.get("history")
+        # 用户选择的playbook路由信息
+        route_selection = body.get("route_selection")
+        if continuation is not None and not isinstance(continuation, dict):
+            return JSONResponse(content={"ok": False, "error": "continuation 必须是对象"}, status_code=400)
+        if history is not None and not isinstance(history, list):
+            return JSONResponse(content={"ok": False, "error": "history 必须是数组"}, status_code=400)
+        if route_selection is not None and not isinstance(route_selection, dict):
+            return JSONResponse(content={"ok": False, "error": "route_selection 必须是对象"}, status_code=400)
+        if continuation is None and not message:
+            return JSONResponse(content={"ok": False, "error": "消息内容不能为空"}, status_code=400)
+        if isinstance(continuation, dict):
+            user_message = str(continuation.get("user_message") or "").strip()
+            if not user_message:
+                return JSONResponse(content={"ok": False, "error": "continuation 缺少 user_message"}, status_code=400)
+            tool_context: dict[str, Any] = dict(continuation.get("tool_context") or {})
+        else:
+            user_message = message
+            tool_context = {}
+        route_selection_payload = build_matched_playbook_payload_by_id(str((route_selection or {}).get("playbook_id") or "").strip())
+        continuation_kind = str((continuation or {}).get("kind") or "").strip() if isinstance(continuation, dict) else ""
+        logger_.info(
+            "Chat 执行前状态重置 | has_route_selection=%s | playbook_id=%s | has_root=%s | continuation_kind=%s",
+            bool(route_selection),
+            str((route_selection or {}).get("playbook_id") or "").strip(),
+            bool(isinstance(route_selection_payload, dict) and isinstance(route_selection_payload.get("root"), dict)),
+            continuation_kind or "-",
+        )
+        # 如果用户选择了新的 playbook 路由，或者当前的继续执行上下文不是来自于 playbook 确认（即用户在确认某个 playbook 的执行），
+        # 则重置当前的 playbook 执行状态，准备开始新的 playbook 执行流程；否则继续沿用当前的执行状态，继续执行后续步骤。
+        if route_selection_payload:
+            reset_live_playbook_execution(playbook=route_selection_payload)
+        else:
+            clear_live_playbook_state()
+        # 调用核心的对话执行函数，传入用户消息、对话历史、继续执行上下文、用户选择的 playbook 路由等信息，得到模型的响应结果
+        result = await asyncio.to_thread(
+            run_fault_chat_graph,
+            user_message,
             runtime_context={
-                "connected": bool(session["client"].connected),
-                "host": str(last_config.get("host") or ""),
-                "port": str(last_config.get("port") or ""),
-                "username": str(last_config.get("username") or ""),
-                "preferred_root": str(session.get("preferred_root") or "/"),
-                "recent_tasks": task_manager.list_tasks_for_owner(get_session_id(request), MAX_TASK_ITEMS),
+                "connected": False,
             },
             tool_context=tool_context,
+            conversation_history=[
+                {
+                    "role": str(item.get("role") or "").strip(),
+                    "content": str(item.get("content") or "").strip(),
+                }
+                for item in (history or [])
+                if isinstance(item, dict)
+            ],
+            # 继续执行的上下文
+            resume_continuation=continuation if isinstance(continuation, dict) else None,
+            # 用户确认的信息
+            confirmation_response=message if continuation_kind == "playbook_confirmation" else "",
+            # 用户选择的 playbook 路由信息，如果继续执行的上下文来自于 playbook 确认，则沿用当前的
+            prefetched_playbook_id=str((route_selection or {}).get("playbook_id") or "").strip(),
+            prefetched_playbook_title=str((route_selection or {}).get("playbook_title") or "").strip(),
+            prefetched_reason=str((route_selection or {}).get("reason") or "").strip(),
         )
-        append_chat_history_turn(
-            tool_context,
-            user_message=payload.message,
-            assistant_message=str(result.get("message") or ""),
-        )
+        logger_.info("Chat response: %s", result.get("message") or "")
         return {"ok": True, **result}
 
-    @app.post("/api/chat/reset")
-    def api_chat_reset(request: Request):
-        reset_chat_state({"session": get_session(request)})
-        return {"ok": True, "message": "聊天上下文已清空"}
-
-    @app.get("/api/chat/history")
-    def api_chat_history(request: Request):
-        return {"ok": True, "history": get_chat_history({"session": get_session(request)})}
-
-    @app.get("/api/agent/tools")
-    def api_agent_tools():
-        return {"ok": True, "items": agent_tool_registry.list_definitions()}
-
-    @app.post("/api/agent/tool-call")
-    def api_agent_tool_call(payload: AgentToolCallPayload, request: Request):
-        result = agent_tool_registry.call_tool(
-            payload.name,
-            payload.arguments,
-            {"session": get_session(request)},
+    @app.post("/api/chat/route")
+    async def api_chat_route(request: Request):
+        body = await request.json()
+        message = str(body.get("message") or "").strip()
+        continuation = body.get("continuation")
+        if continuation is not None and not isinstance(continuation, dict):
+            return JSONResponse(content={"ok": False, "error": "continuation 必须是对象"}, status_code=400)
+        if not continuation and not message:
+            return JSONResponse(content={"ok": False, "error": "消息内容不能为空"}, status_code=400)
+        route_state = {
+            **load_catalog_node({}),
+            "user_message": message,
+            "resume_continuation": continuation if isinstance(continuation, dict) else None,
+        }
+        route_result = await asyncio.to_thread(resolve_playbook_route, route_state, publish=True)
+        playbook_id = str(route_result.get("selected_playbook_id") or "").strip()
+        playbook_title = str(route_result.get("selected_playbook_title") or "").strip()
+        reason = str(route_result.get("reason") or "").strip()
+        playbook_payload = build_matched_playbook_payload_by_id(playbook_id)
+        logger_.info(
+            "路由接口返回 | playbook_id=%s | title=%s | has_root=%s",
+            playbook_id,
+            playbook_title,
+            bool(isinstance(playbook_payload, dict) and isinstance(playbook_payload.get("root"), dict)),
         )
-        return {"ok": True, "result": result}
-
-    @app.get("/api/connection-cache")
-    def api_connection_cache():
-        return {"ok": True, "saved_connections": connection_cache_store.list_entries()}
-
-    @app.post("/api/connection-cache/clear")
-    def api_clear_connection_cache():
-        return {"ok": True, "message": "连接缓存已清空", "saved_connections": connection_cache_store.clear()}
-
-    @app.get("/api/remote-shortcuts")
-    def api_remote_shortcuts(request: Request):
-        shortcut_payload = refresh_remote_shortcuts(get_session(request))
-        return {"ok": True, "shortcuts": shortcut_payload["shortcuts"], "preferred_root": shortcut_payload["preferred_root"]}
-
-    @app.get("/api/upload-progress/{upload_token}")
-    def api_upload_progress(upload_token: str, request: Request):
-        return {"ok": True, "progress": upload_progress_manager.get(upload_token, get_session_id(request))}
-
-    @app.get("/api/ping")
-    def api_ping(request: Request):
-        session = get_session(request)
         return {
             "ok": True,
-            "session_id": get_session_id(request),
-            "connected": bool(session["client"].connected),
+            "route_selection": {
+                "playbook_id": playbook_id,
+                "playbook_title": playbook_title,
+                "reason": reason,
+            },
+            "playbook": playbook_payload,
         }
 
-    @app.get("/api/ros/topics")
-    def api_ros_topics(request: Request):
-        client = ensure_client_connected(get_session(request))
-        return {"ok": True, **ros_list_topics(client)}
+    @app.get("/api/chat/state")
+    async def api_chat_state(request: Request):
+        raw_since_version = request.query_params.get("since_version", "0")
+        try:
+            since_version = max(int(raw_since_version), 0)
+        except ValueError:
+            since_version = 0
+        return {"ok": True, **get_live_playbook_state(since_version=since_version)}
 
-    @app.get("/api/ros/services")
-    def api_ros_services(request: Request):
-        client = ensure_client_connected(get_session(request))
-        return {"ok": True, **ros_list_services(client)}
-
-    @app.get("/api/ros/topic-info")
-    def api_ros_topic_info(request: Request, name: str = ""):
-        client = ensure_client_connected(get_session(request))
-        return {"ok": True, **ros_topic_info(client, name)}
-
-    @app.get("/api/ros/topic-type")
-    def api_ros_topic_type(request: Request, name: str = ""):
-        client = ensure_client_connected(get_session(request))
-        return {"ok": True, **ros_topic_type(client, name)}
-
-    @app.get("/api/ros/message-definition")
-    def api_ros_message_definition(request: Request, type_name: str = ""):
-        client = ensure_client_connected(get_session(request))
-        return {"ok": True, **ros_message_definition(client, type_name)}
-
-    @app.get("/api/ros/topic-echo")
-    def api_ros_topic_echo(request: Request, name: str = ""):
-        client = ensure_client_connected(get_session(request))
-        return {"ok": True, **ros_topic_echo(client, name, timeout=15.0, line_limit=120)}
-
-    @app.post("/api/ros/topic-pub")
-    def api_ros_topic_pub(payload: RosTopicPublishPayload, request: Request):
-        client = ensure_client_connected(get_session(request))
-        return {"ok": True, **ros_topic_publish(client, payload.name, payload.message_type, payload.message)}
-
-    @app.get("/api/ros/service-info")
-    def api_ros_service_info(request: Request, name: str = ""):
-        client = ensure_client_connected(get_session(request))
-        return {"ok": True, **ros_service_info(client, name)}
-
-    @app.get("/api/ros/service-type")
-    def api_ros_service_type(request: Request, name: str = ""):
-        client = ensure_client_connected(get_session(request))
-        return {"ok": True, **ros_service_type(client, name)}
-
-    @app.get("/api/ros/service-definition")
-    def api_ros_service_definition(request: Request, name: str = ""):
-        client = ensure_client_connected(get_session(request))
-        return {"ok": True, **ros_service_definition_by_name(client, name)}
-
-    @app.post("/api/ros/service-call")
-    def api_ros_service_call(payload: RosServiceCallPayload, request: Request):
-        client = ensure_client_connected(get_session(request))
-        return {"ok": True, **ros_service_call(client, payload.name, payload.request)}
-
-    @app.get("/api/deploy-target")
-    def api_deploy_target(request: Request, file_name: str = "", machine_type: str = "", device_type: str = "ORIN"):
-        session = get_session(request)
-        client, should_close_target_client, _ = create_package_target_client(
-            session,
-            device_type,
+    @app.get("/api/chat/events")
+    async def api_chat_events(request: Request):
+        raw_since_version = request.query_params.get("since_version", "0")
+        try:
+            since_version = max(int(raw_since_version), 0)
+        except ValueError:
+            since_version = 0
+        return StreamingResponse(
+            stream_live_playbook_events(since_version=since_version),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
-        try:
-            resolved_remote_dir, normalized_file_name, remote_path = resolve_deploy_target(client, file_name)
-            return {"ok": True, "remote_dir": resolved_remote_dir, "file_name": normalized_file_name, "remote_path": remote_path, "exists": client.path_exists(remote_path)}
-        finally:
-            if should_close_target_client:
-                client.close()
 
-    @app.post("/api/deploy")
-    def api_deploy(request: Request, machine_type: str = Form(""), device_type: str = Form("ORIN"), file_name: str = Form(""), server_file_path: str = Form(""), replace_existing: str = Form(""), use_existing_remote: str = Form(""), auto_deploy: str = Form(""), upload_token: str = Form(""), deb_file: UploadFile | None = File(None)):
-        session = get_session(request)
-        session_id = get_session_id(request)
-        client, should_close_target_client, target = create_package_target_client(
-            session,
-            device_type,
-        )
-        replace_existing_flag = parse_bool(replace_existing)
-        use_existing_remote_flag = parse_bool(use_existing_remote)
-        auto_deploy_flag = parse_bool(auto_deploy)
-        if replace_existing_flag and use_existing_remote_flag:
-            raise ApiError("同名文件处理参数冲突")
-        try:
-            deploy_profile = deploy_config_store.get_profile("package")
-            selected_file_name = os.path.basename(file_name or "")
-            if str(server_file_path or "").strip():
-                selected_file_name = os.path.basename(resolve_download_source_path(server_file_path))
-            elif deb_file is not None:
-                selected_file_name = os.path.basename(deb_file.filename or "") or selected_file_name
-            resolved_remote_dir, selected_file_name, remote_path = resolve_deploy_target(client, selected_file_name)
-            remote_exists = client.path_exists(remote_path)
-            has_source_input = bool(str(server_file_path or "").strip() or deb_file is not None)
-            reuse_state: dict[str, Any] = {"exists": remote_exists}
-            can_reuse_remote = False
-            cleanup_existing_remote_files = True
-            if remote_exists:
-                can_reuse_remote, reuse_state = is_reusable_existing_remote_package(client, remote_path, str(target.get("username") or ""))
-            if auto_deploy_flag and remote_exists and not replace_existing_flag:
-                use_existing_remote_flag = True
-            if use_existing_remote_flag and remote_exists and not can_reuse_remote:
-                if has_source_input:
-                    selected_file_name = build_unique_deploy_filename(selected_file_name, reason="reupload")
-                    resolved_remote_dir, selected_file_name, remote_path = resolve_deploy_target(client, selected_file_name)
-                    remote_exists = client.path_exists(remote_path)
-                    use_existing_remote_flag = False
-                    cleanup_existing_remote_files = False
-                else:
-                    cleanup_existing_remote_files = False
-                    reuse_state = {
-                        **reuse_state,
-                        "fallback": "sudo_chmod",
-                        "message": "远端包所有者不匹配，但继续走 sudo 兜底权限修复",
-                    }
-            if remote_exists and not replace_existing_flag and not use_existing_remote_flag and not has_source_input:
-                raise ApiError(f"远程已存在同名文件: {remote_path}", status_code=409, payload={"conflict": {"remote_path": remote_path, "file_name": selected_file_name, "remote_dir": resolved_remote_dir}})
-            if use_existing_remote_flag and not remote_exists:
-                raise ApiError(f"远端不存在可直接安装的文件: {remote_path}")
-            if use_existing_remote_flag:
-                file_bytes = b""
-                source_metadata = {"source_kind": "existing_remote", "source_path": "", "download_path": "", "local_tmp_path": ""}
-            else:
-                if str(server_file_path or "").strip():
-                    download_path = resolve_download_source_path(server_file_path)
-                    upload_progress_manager.start(str(upload_token or "").strip(), file_name=os.path.basename(download_path), phase="downloading_from_server", message=f"正在从文件服务器下载: {download_path}", owner_id=session_id)
-                selected_file_name, file_bytes, source_metadata = prepare_package_bytes(deb_file, server_file_path, local_error_message="请选择要部署的安装包文件或填写文件服务器包路径")
-                if str(server_file_path or "").strip():
-                    upload_progress_manager.update(str(upload_token or "").strip(), transferred_bytes=len(file_bytes), total_bytes=len(file_bytes), phase="queued", message="文件已从服务器下载，准备创建部署任务")
-                resolved_remote_dir, selected_file_name, remote_path = resolve_deploy_target(client, selected_file_name)
-            deploy_profile = deploy_config_store.get_profile("package", machine_type)
-            title, metadata, runner = create_deploy_runner(
-                session,
-                remote_dir=resolved_remote_dir,
-                machine_type=str(deploy_profile.get("machine_type") or ""),
-                device_type=str(target.get("device_type") or device_type).upper(),
-                install_template=deploy_profile["install_template"],
-                start_command=deploy_profile["start_command"],
-                health_command=deploy_profile["health_command"],
-                rollback_template=deploy_profile["rollback_template"],
-                auto_rollback=bool(deploy_profile["auto_rollback"]),
-                file_name=selected_file_name,
-                file_bytes=file_bytes,
-                source_metadata=source_metadata,
-                skip_upload=use_existing_remote_flag,
-                cleanup_existing_remote_files=cleanup_existing_remote_files,
-                upload_token=str(upload_token or "").strip(),
-                owner_id=session_id,
-            )
-            metadata.update({"deploy_mode": "package", "remote_dir": resolved_remote_dir, "remote_path": remote_path, "deploy_config_path": str(DEPLOY_CONFIG_PATH), "machine_type": str(deploy_profile.get("machine_type") or ""), "device_type": str(target.get("device_type") or device_type).upper(), "target_host": str(target.get("host") or ""), "target_port": int(target.get("port") or 22), "target_username": str(target.get("username") or ""), "used_existing_remote": use_existing_remote_flag, "replaced_existing_remote": bool(remote_exists and replace_existing_flag), "source_kind": str(source_metadata.get("source_kind") or ""), "source_path": str(source_metadata.get("source_path") or ""), "download_path": str(source_metadata.get("download_path") or ""), "remote_reuse_state": reuse_state})
-            return {"ok": True, "task": task_manager.create_task("deployment", title, metadata, runner, owner_id=session_id)}
-        finally:
-            if should_close_target_client:
-                client.close()
-
-    @app.post("/api/package-upload-probe")
-    def api_package_upload_probe(
-        request: Request,
-        device_type: str = Form("ORIN"),
-        file_name: str = Form(""),
-        server_file_path: str = Form(""),
-        replace_existing: str = Form(""),
-        use_existing_remote: str = Form(""),
-        upload_token: str = Form(""),
-        deb_file: UploadFile | None = File(None),
-    ):
-        session = get_session(request)
-        session_id = get_session_id(request)
-        client, should_close_target_client, target = create_package_target_client(
-            session,
-            device_type,
-        )
-        replace_existing_flag = parse_bool(replace_existing)
-        use_existing_remote_flag = parse_bool(use_existing_remote)
-        if replace_existing_flag and use_existing_remote_flag:
-            raise ApiError("同名文件处理参数冲突")
-        deploy_profile = deploy_config_store.get_profile("package")
-        fallback_machine_options = deploy_config_store.get_machine_options("package") or parse_machine_options_from_output("")
-        try:
-            selected_file_name = os.path.basename(file_name or "")
-            if str(server_file_path or "").strip():
-                selected_file_name = os.path.basename(resolve_download_source_path(server_file_path))
-            elif deb_file is not None:
-                selected_file_name = os.path.basename(deb_file.filename or "") or selected_file_name
-            resolved_remote_dir, selected_file_name, remote_path = resolve_deploy_target(client, selected_file_name)
-            remote_exists = client.path_exists(remote_path)
-            has_source_input = bool(str(server_file_path or "").strip() or deb_file is not None)
-            can_reuse_remote = False
-            if remote_exists:
-                can_reuse_remote, _ = is_reusable_existing_remote_package(client, remote_path, str(target.get("username") or ""))
-            if use_existing_remote_flag and remote_exists and not can_reuse_remote and has_source_input:
-                selected_file_name = build_unique_deploy_filename(selected_file_name, reason="reupload")
-                resolved_remote_dir, selected_file_name, remote_path = resolve_deploy_target(client, selected_file_name)
-                remote_exists = client.path_exists(remote_path)
-                use_existing_remote_flag = False
-            if remote_exists and not replace_existing_flag and not use_existing_remote_flag:
-                raise ApiError(
-                    f"远程已存在同名文件: {remote_path}",
-                    status_code=409,
-                    payload={"conflict": {"remote_path": remote_path, "file_name": selected_file_name, "remote_dir": resolved_remote_dir}},
-                )
-            if use_existing_remote_flag and not remote_exists:
-                raise ApiError(f"远端不存在可直接识别的文件: {remote_path}")
-
-            if use_existing_remote_flag:
-                upload_progress_manager.start(
-                    str(upload_token or "").strip(),
-                    file_name=selected_file_name,
-                    total_bytes=0,
-                    phase="completed",
-                    message=f"已复用远端安装包: {remote_path}",
-                    owner_id=session_id,
-                )
-                upload_progress_manager.update(
-                    str(upload_token or "").strip(),
-                    transferred_bytes=0,
-                    total_bytes=0,
-                    phase="completed",
-                    message=f"已复用远端安装包: {remote_path}",
-                    done=True,
-                    owner_id=session_id,
-                )
-            else:
-                if str(server_file_path or "").strip():
-                    download_path = resolve_download_source_path(server_file_path)
-                    upload_progress_manager.start(
-                        str(upload_token or "").strip(),
-                        file_name=os.path.basename(download_path),
-                        phase="downloading_from_server",
-                        message=f"正在从文件服务器下载: {download_path}",
-                        owner_id=session_id,
-                    )
-                selected_file_name, file_bytes, _ = prepare_package_bytes(
-                    deb_file,
-                    server_file_path,
-                    local_error_message="请选择 firmware 文件或填写文件服务器包路径",
-                )
-                if str(server_file_path or "").strip():
-                    upload_progress_manager.update(
-                        str(upload_token or "").strip(),
-                        transferred_bytes=len(file_bytes),
-                        total_bytes=len(file_bytes),
-                        phase="preparing",
-                        message="文件已从服务器下载，准备上传并识别机型",
-                        owner_id=session_id,
-                    )
-                resolved_remote_dir, selected_file_name, remote_path = resolve_deploy_target(client, selected_file_name)
-                package_prefix = selected_file_name.split("_", 1)[0].strip() or selected_file_name
-                removed_files = client.remove_files_by_prefix(
-                    resolved_remote_dir,
-                    package_prefix,
-                    sudo_password=str(target.get("password") or ""),
-                )
-                for removed_file in removed_files:
-                    if removed_file != remote_path:
-                        pass
-                upload_progress_manager.update(
-                    str(upload_token or "").strip(),
-                    transferred_bytes=0,
-                    total_bytes=len(file_bytes),
-                    phase="uploading_to_robot",
-                    message=f"正在上传到目标处理器: {remote_path}",
-                    owner_id=session_id,
-                )
-                client.upload_bytes(file_bytes, remote_path, progress_callback=lambda transferred, total: upload_progress_manager.update(
-                    str(upload_token or "").strip(),
-                    transferred_bytes=transferred,
-                    total_bytes=total,
-                    phase="uploading_to_robot",
-                    message=f"正在上传到目标处理器: {remote_path}",
-                    owner_id=session_id,
-                ))
-                upload_progress_manager.update(
-                    str(upload_token or "").strip(),
-                    transferred_bytes=len(file_bytes),
-                    total_bytes=len(file_bytes),
-                    phase="installing",
-                    message=f"安装包已上传到机器人，正在识别机型: {remote_path}",
-                    done=False,
-                    owner_id=session_id,
-                )
-                session["last_remote_deb_path"] = remote_path
-
-            allowed_values_map = {
-                str(option.get("value") or "").strip().upper(): str(option.get("value") or "").strip()
-                for option in fallback_machine_options
-                if isinstance(option, dict) and str(option.get("value") or "").strip()
-            }
-            try:
-                robot_type_value = str(client.get_interactive_env("ROBOT_TYPE") or "").strip()
-            except Exception:
-                robot_type_value = ""
-            selected_machine_type = ""
-            probe_command = render_remote_command(
-                str(deploy_profile.get("probe_command_template") or "chmod +x {deb_path} && {deb_path} --get_robot_type"),
-                remote_path,
-                {
-                    "device_type": str(target.get("device_type") or device_type).upper(),
-                    "target_username": str(target.get("username") or ""),
-                    "target_password": str(target.get("password") or ""),
-                },
-            )
-            probe_result = {"exit_code": 0, "stdout": "", "stderr": ""}
-            probe_output = ""
-            probe_warning = ""
-            if robot_type_value:
-                normalized_robot_type = allowed_values_map.get(robot_type_value.upper(), robot_type_value)
-                if allowed_values_map and normalized_robot_type.upper() not in allowed_values_map:
-                    machine_options = fallback_machine_options
-                    probe_warning = f"检测到 ROBOT_TYPE={robot_type_value}，但不在可配置机型范围内，请手动选择机型"
-                else:
-                    selected_machine_type = normalized_robot_type
-                    machine_options = fallback_machine_options or [
-                        {
-                            "value": normalized_robot_type,
-                            "label": normalized_robot_type,
-                        }
-                    ]
-            else:
-                probe_result = client.exec_command(probe_command)
-                probe_output = "\n".join(
-                    part for part in [str(probe_result.get("stdout") or "").strip(), str(probe_result.get("stderr") or "").strip()] if part
-                )
-                if int(probe_result.get("exit_code") or 0) != 0:
-                    machine_options = fallback_machine_options
-                    probe_warning = "未读取到 ROBOT_TYPE，且机型识别命令执行失败，请手动选择机型"
-                else:
-                    parsed_options = parse_machine_options_from_output(probe_output)
-                    if allowed_values_map:
-                        parsed_options = [
-                            option
-                            for option in parsed_options
-                            if str(option.get("value") or "").strip().upper() in allowed_values_map
-                        ]
-                    machine_options = parsed_options or fallback_machine_options
-                    if not parsed_options:
-                        probe_warning = "未读取到 ROBOT_TYPE，请手动选择机型"
-            upload_progress_manager.update(
-                str(upload_token or "").strip(),
-                transferred_bytes=0,
-                total_bytes=0,
-                phase="completed",
-                message="机型识别完成",
-                done=True,
-                owner_id=session_id,
-            )
-            return {
-                "ok": True,
-                "remote_dir": resolved_remote_dir,
-                "file_name": selected_file_name,
-                "remote_path": remote_path,
-                "device_type": str(target.get("device_type") or device_type).upper(),
-                "probe_command": probe_command,
-                "probe_result": probe_result,
-                "machine_options": machine_options,
-                "selected_machine_type": selected_machine_type,
-                "robot_type": robot_type_value,
-                "probe_warning": probe_warning,
-            }
-        except Exception as exc:
-            upload_progress_manager.fail(str(upload_token or "").strip(), f"机型识别失败: {exc}", owner_id=session_id)
-            raise
-        finally:
-            if should_close_target_client:
-                client.close()
-
-    @app.post("/api/deploy-module")
-    def api_deploy_module(
-        request: Request,
-        module_name: str = Form(""),
-        server_file_path: str = Form(""),
-        server_file_paths_json: str = Form(""),
-        auto_module_version: str = Form(""),
-        auto_deploy: str = Form(""),
-        upload_token: str = Form(""),
-        deb_file: UploadFile | None = File(None),
-    ):
-        session = get_session(request)
-        session_id = get_session_id(request)
-        client = ensure_client_connected(session)
-        auto_deploy_flag = parse_bool(auto_deploy)
-        selected_module_name = require_text(module_name, "请选择要部署的模块")
-        selected_module_path = client.resolve_remote_path(posixpath.join(MODULE_DEPLOY_ROOT, selected_module_name))
-        if not client.path_exists(selected_module_path):
-            raise ApiError(f"模块目录不存在: {selected_module_path}")
-        if not client.is_dir_path(selected_module_path):
-            raise ApiError(f"模块路径不是目录: {selected_module_path}")
-        package_files: list[dict[str, Any]] = []
-        batch_server_paths: list[str] = []
-        if str(server_file_paths_json or "").strip():
-            try:
-                raw_paths = json.loads(server_file_paths_json)
-            except json.JSONDecodeError as exc:
-                raise ApiError(f"自动部署包路径配置解析失败: {exc}") from exc
-            if not isinstance(raw_paths, list):
-                raise ApiError("自动部署包路径格式错误，应为数组")
-            batch_server_paths = [str(item or "").strip() for item in raw_paths if str(item or "").strip()]
-        if batch_server_paths:
-            total_download_bytes = 0
-            for index, path in enumerate(batch_server_paths, start=1):
-                download_path = resolve_download_source_path(path)
-                upload_progress_manager.start(
-                    str(upload_token or "").strip(),
-                    file_name=os.path.basename(download_path),
-                    phase="downloading_from_server",
-                    message=f"[{index}/{len(batch_server_paths)}] 正在从文件服务器下载: {download_path}",
-                    owner_id=session_id,
-                )
-                package_file_name, package_file_bytes, source_metadata = prepare_package_bytes(
-                    None,
-                    path,
-                    local_error_message="请选择要部署的模块 deb 文件或填写文件服务器包路径",
-                )
-                total_download_bytes += len(package_file_bytes)
-                upload_progress_manager.update(
-                    str(upload_token or "").strip(),
-                    transferred_bytes=total_download_bytes,
-                    total_bytes=total_download_bytes,
-                    phase="queued",
-                    message=f"[{index}/{len(batch_server_paths)}] 文件已从服务器下载，准备创建模块部署任务",
-                )
-                package_files.append(
-                    {
-                        "package_file_name": package_file_name,
-                        "package_file_bytes": package_file_bytes,
-                        "source_metadata": source_metadata,
-                    }
-                )
-        else:
-            if str(server_file_path or "").strip():
-                download_path = resolve_download_source_path(server_file_path)
-                upload_progress_manager.start(str(upload_token or "").strip(), file_name=os.path.basename(download_path), phase="downloading_from_server", message=f"正在从文件服务器下载: {download_path}", owner_id=session_id)
-            package_file_name, package_file_bytes, source_metadata = prepare_package_bytes(deb_file, server_file_path, local_error_message="请选择要部署的模块 deb 文件或填写文件服务器包路径")
-            if str(server_file_path or "").strip():
-                upload_progress_manager.update(str(upload_token or "").strip(), transferred_bytes=len(package_file_bytes), total_bytes=len(package_file_bytes), phase="queued", message="文件已从服务器下载，准备创建模块部署任务")
-            package_files.append(
-                {
-                    "package_file_name": package_file_name,
-                    "package_file_bytes": package_file_bytes,
-                    "source_metadata": source_metadata,
-                }
-            )
-        deploy_profile = deploy_config_store.get_profile("module", selected_module_name)
-        title, metadata, runner = create_module_deploy_runner(
-            session,
-            module_name=selected_module_name,
-            module_path=selected_module_path,
-            package_files=package_files,
-            auto_deploy_version=str(auto_module_version or "").strip(),
-            upload_token=str(upload_token or "").strip(),
-            install_template=deploy_profile["install_template"],
-            up_wait_seconds=int(deploy_profile.get("up_wait_seconds") or 0),
-            start_command=deploy_profile["start_command"],
-            health_command=deploy_profile["health_command"],
-            rollback_template=deploy_profile["rollback_template"],
-            auto_rollback=bool(deploy_profile["auto_rollback"]),
-            auto_deploy=auto_deploy_flag,
-            owner_id=session_id,
-        )
-        first_package_name = str(package_files[0].get("package_file_name") or "")
-        first_source_metadata = package_files[0].get("source_metadata") if isinstance(package_files[0].get("source_metadata"), dict) else {}
-        metadata.update(
-            {
-                "deploy_mode": "module",
-                "module_name": selected_module_name,
-                "module_path": selected_module_path,
-                "up_wait_seconds": int(deploy_profile.get("up_wait_seconds") or 0),
-                "package_file_name": first_package_name,
-                "package_file_names": [str(item.get("package_file_name") or "") for item in package_files],
-                "package_count": len(package_files),
-                "auto_deploy": auto_deploy_flag,
-                "auto_deploy_version": str(auto_module_version or "").strip(),
-                "package_prefix": first_package_name.split("_", 1)[0].strip() if first_package_name else "",
-                "remote_path": client.resolve_remote_path(posixpath.join(selected_module_path, first_package_name)) if first_package_name else selected_module_path,
-                "remote_paths": [
-                    client.resolve_remote_path(posixpath.join(selected_module_path, str(item.get("package_file_name") or "")))
-                    for item in package_files
-                    if str(item.get("package_file_name") or "").strip()
-                ],
-                "deploy_config_path": str(DEPLOY_CONFIG_PATH),
-                "source_kind": str(first_source_metadata.get("source_kind") or ""),
-                "source_path": str(first_source_metadata.get("source_path") or ""),
-                "download_path": str(first_source_metadata.get("download_path") or ""),
-            }
-        )
-        return {"ok": True, "task": task_manager.create_task("deployment", title, metadata, runner, owner_id=session_id)}
-
-    @app.get("/api/tasks")
-    def api_tasks(request: Request, limit: int = MAX_TASK_ITEMS):
-        return {"ok": True, "tasks": task_manager.list_tasks_for_owner(get_session_id(request), limit=limit)}
-
-    @app.get("/api/tasks/{task_id}")
-    def api_task_detail(task_id: str, request: Request):
-        task = task_manager.get_task_for_owner(task_id, get_session_id(request))
-        if not task:
-            raise ApiError("任务不存在", status_code=404)
-        return {"ok": True, "task": task}
-
-    @app.get("/api/history")
-    def api_history(request: Request, limit: int = 20):
-        return {"ok": True, "history": history_store.list_entries(limit=limit, owner_id=get_session_id(request))}
-
-    @app.post("/api/history/{entry_id}/rollback")
-    def api_history_rollback(entry_id: int, request: Request):
-        entry = history_store.get_entry(entry_id, owner_id=get_session_id(request))
-        if not entry:
-            raise ApiError("历史记录不存在", status_code=404)
-        title, runner = create_history_rollback_runner(get_session(request), entry)
-        return {"ok": True, "task": task_manager.create_task("rollback", title, {"source_history_id": entry_id, "operation_type": entry["operation_type"]}, runner, owner_id=get_session_id(request))}
-
-    @app.post("/api/upload-deb")
-    def api_upload_deb(request: Request, remote_dir: str = Form(...), command_template: str = Form("dpkg -i {deb_path}"), install_after_upload: str | None = Form(None), upload_token: str = Form(""), deb_file: UploadFile | None = File(None)):
-        session = get_session(request)
-        session_id = get_session_id(request)
-        client = ensure_client_connected(session)
-        upload = require_upload(deb_file, "请上传 deb 文件")
-        remote_dir = require_text(remote_dir, "远程目录不能为空")
-        filename = os.path.basename(upload.filename or "package.deb")
-        raw_bytes = upload.file.read()
-        try:
-            upload_progress_manager.start(upload_token, file_name=filename, total_bytes=len(raw_bytes), phase="uploading_to_robot", message="正在上传到机器人", owner_id=session_id)
-            remote_path = client.resolve_remote_path(posixpath.join(remote_dir, filename))
-            client.upload_bytes(raw_bytes, remote_path, progress_callback=lambda transferred, total: upload_progress_manager.update(upload_token, transferred_bytes=transferred, total_bytes=total, phase="uploading_to_robot", message=f"正在上传到机器人: {remote_path}"))
-            session["last_remote_deb_path"] = remote_path
-            install_result = None
-            install_command = None
-            if parse_bool(install_after_upload):
-                upload_progress_manager.update(upload_token, transferred_bytes=len(raw_bytes), total_bytes=len(raw_bytes), phase="installing", message="安装包上传完成，正在执行安装命令")
-                install_command = render_remote_command(str(command_template or "dpkg -i {deb_path}"), remote_path)
-                install_result = client.exec_command(install_command)
-            upload_progress_manager.update(upload_token, transferred_bytes=len(raw_bytes), total_bytes=len(raw_bytes), phase="completed", message=f"安装包处理完成: {remote_path}", done=True)
-            return {"ok": True, "message": f"deb 已上传到 {remote_path}", "remote_path": remote_path, "install_command": install_command, "install_result": install_result}
-        except Exception as exc:  # noqa: BLE001
-            upload_progress_manager.fail(upload_token, f"上传失败: {exc}")
-            raise
-
-    @app.post("/api/install-deb")
-    def api_install_deb(payload: InstallDebPayload, request: Request):
-        session = get_session(request)
-        remote_path = require_text(payload.remote_path, "远程 deb 路径不能为空")
-        command = render_remote_command(str(payload.command_template or "dpkg -i {deb_path}"), remote_path)
-        result = ensure_client_connected(session).exec_interactive_command(command)
-        session["last_remote_deb_path"] = remote_path
-        return {"ok": True, "command": command, "result": result}
-
-    @app.post("/api/execute")
-    def api_execute(payload: ExecutePayload, request: Request):
-        client = ensure_client_connected(get_session(request))
-        command = require_text(payload.command, "命令不能为空")
-        if payload.interactive:
-            result = client.exec_interactive_command(command)
-        else:
-            result = client.exec_command(command)
-        return {"ok": True, "result": result}
-
-    @app.get("/api/list-dir")
-    def api_list_dir(request: Request, path: str = "/", device_type: str = "ORIN"):
-        session = get_session(request)
-        client, should_close_target_client, target = create_package_target_client(session, device_type)
-        try:
-            resolved_path = client.resolve_remote_path(path)
-            return {
-                "ok": True,
-                "entries": client.list_dir(resolved_path),
-                "resolved_path": resolved_path,
-                "device_type": str(target.get("device_type") or device_type).upper(),
-            }
-        finally:
-            if should_close_target_client:
-                client.close()
-
-    @app.get("/api/download-log-archive")
-    def api_download_log_archive(
-        request: Request,
-        device_type: str = "ORIN",
-        module_names: str = "",
-        start_at: str = "",
-        end_at: str = "",
-        root: str = "/home/naviai/navi_project/logs",
-    ):
-        session = get_session(request)
-        client, should_close_target_client, target = create_package_target_client(session, device_type)
-        try:
-            resolved_root, selected_modules, files = collect_log_files(
-                client=client,
-                root=root,
-                module_names=module_names,
-                start_at=start_at,
-                end_at=end_at,
-            )
-            if not files:
-                raise ApiError("当前筛选条件下没有可打包的日志文件", status_code=404)
-
-            archive_name = build_log_archive_name(str(target.get("device_type") or device_type).upper(), start_at, end_at)
-            archive_stream = io.BytesIO()
-            with zipfile.ZipFile(archive_stream, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-                for entry in files:
-                    remote_path = str(entry.get("path") or "").strip()
-                    relative_path = str(entry.get("relative_path") or os.path.basename(remote_path) or "log.txt").strip()
-                    if not remote_path or not relative_path:
-                        continue
-                    archive.writestr(relative_path, client.read_file_bytes(remote_path))
-
-                manifest_lines = [
-                    f"device_type: {str(target.get('device_type') or device_type).upper()}",
-                    f"resolved_root: {resolved_root}",
-                    f"module_names: {', '.join(sorted(selected_modules)) if selected_modules else 'ALL'}",
-                    f"start_at: {str(start_at or '').strip() or '-'}",
-                    f"end_at: {str(end_at or '').strip() or '-'}",
-                    f"file_count: {len(files)}",
-                    "",
-                    "files:",
-                ]
-                manifest_lines.extend(f"- {str(entry.get('relative_path') or entry.get('path') or '').strip()}" for entry in files)
-                archive.writestr("_manifest.txt", "\n".join(manifest_lines).strip() + "\n")
-
-            archive_stream.seek(0)
-            headers = {"Content-Disposition": f'attachment; filename="{archive_name}"'}
-            return StreamingResponse(archive_stream, media_type="application/zip", headers=headers)
-        finally:
-            if should_close_target_client:
-                client.close()
-
-    @app.get("/api/scan-paths")
-    def api_scan_paths(request: Request, root: str = "/", keyword: str = ""):
-        session = get_session(request)
-        client = ensure_client_connected(session)
-        resolved_root = client.resolve_remote_path(root)
-        entries = client.walk_entries(resolved_root)
-        all_paths = [resolved_root, *[entry["path"] for entry in entries]]
-        all_directories = [resolved_root, *[entry["path"] for entry in entries if entry["is_dir"]]]
-        session["path_cache"] = all_paths
-        normalized_keyword = keyword.strip().lower()
-        if normalized_keyword:
-            paths = [item for item in all_paths if normalized_keyword in item.lower()]
-            directories = [item for item in all_directories if normalized_keyword in item.lower()]
-        else:
-            paths = all_paths
-            directories = all_directories
-        return {"ok": True, "count": len(paths), "paths": paths, "directories": directories, "resolved_root": resolved_root}
-
-    @app.post("/api/replace-file")
-    def api_replace_file(request: Request, remote_path: str = Form(...), backup_before_replace: str | None = Form(None), upload_token: str = Form(""), replace_file: UploadFile | None = File(None)):
-        session = get_session(request)
-        session_id = get_session_id(request)
-        client = ensure_client_connected(session)
-        upload = require_upload(replace_file, "请上传要替换的本地文件")
-        target_path = client.resolve_remote_path(require_text(remote_path, "目标远程文件不能为空"))
-        raw_bytes = upload.file.read()
-        try:
-            upload_progress_manager.start(upload_token, file_name=os.path.basename(upload.filename or target_path), total_bytes=len(raw_bytes), phase="preparing", message="正在准备替换远程文件", owner_id=session_id)
-            backup_path = None
-            if parse_bool(backup_before_replace):
-                upload_progress_manager.update(upload_token, phase="backing_up", message="正在备份远端文件")
-                backup_path = client.backup_remote_path(target_path, sudo_password=current_robot_password(session))
-            client.upload_bytes(raw_bytes, target_path, progress_callback=lambda transferred, total: upload_progress_manager.update(upload_token, transferred_bytes=transferred, total_bytes=total, phase="uploading_to_robot", message=f"正在上传到机器人: {target_path}"))
-            upload_progress_manager.update(upload_token, transferred_bytes=len(raw_bytes), total_bytes=len(raw_bytes), phase="completed", message=f"文件已上传并替换: {target_path}", done=True)
-            history_id = build_file_replace_history(session, target_path, backup_path, {"remote_path": target_path, "backup_path": backup_path or ""})
-            return {"ok": True, "message": f"已替换远程文件 {target_path}", "backup_path": backup_path, "history_id": history_id}
-        except Exception as exc:  # noqa: BLE001
-            upload_progress_manager.fail(upload_token, f"替换失败: {exc}")
-            raise
+    @app.post("/api/chat/reset")
+    async def api_chat_reset():
+        clear_live_playbook_state()
+        return {"ok": True}
 
     return app
+
+
+app = create_app()
+
+
+def main() -> None:
+    import uvicorn
+    print(f"Agent Console 已启动: http://{APP_HOST}:{APP_PORT}")
+    uvicorn.run(app, host=APP_HOST, port=APP_PORT, log_level="info", access_log=False)
+
+
+if __name__ == "__main__":
+    main()

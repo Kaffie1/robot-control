@@ -1,0 +1,175 @@
+version: 1
+description: >
+  覆盖当前行为树 playbook 的主要可用字段与写法，用于人工核对模板与执行逻辑。
+
+playbooks:
+  - id: localization_lost_full_feature_case
+    title: 没有定位 - 全要素示例
+    root:
+      type: selector
+      name: localization_root
+      display_name: 定位恢复判断
+      children:
+        - type: condition
+          name: already_localized
+          display_name: 检查当前是否已有定位
+          tool_name: check_localization
+          arguments:
+            robot_id: "{{ robot_id }}"
+          assert_ref: rule_localized
+          wait_seconds: 1
+          success_message: 当前已有定位，无需恢复
+
+        - type: sequence
+          name: try_recover_localization
+          display_name: 执行定位恢复流程
+          children:
+            - type: action
+              name: operator_approve_recovery
+              display_name: 确认是否允许执行重定位
+              tool_name: record_operator_approval
+              arguments:
+                robot_id: "{{ robot_id }}"
+                operator_approved:
+                  from_context: operator_approved
+              require_confirmation: true
+              confirmation:
+                when: before
+                mode: approve
+                message: 请确认是否允许执行重定位恢复动作
+                output:
+                  store_as: operator_approved
+                  type: boolean
+              assert:
+                type: compare
+                field: result.accepted
+                op: boolean_true
+              failure_message: 操作员未确认恢复动作
+              success_message: 已确认允许执行恢复动作
+
+            - type: action
+              name: ask_customer_map_name
+              display_name: 确认当前使用的地图名称
+              tool_name: trigger_relocalization
+              arguments:
+                robot_id: "{{ robot_id }}"
+                map_name:
+                  from_context: map_name
+                force:
+                  from_context: operator_approved
+              require_confirmation: true
+              confirmation:
+                when: before
+                mode: input
+                message: 请向客户确认当前使用的地图名称
+                input:
+                  type: text
+                  label: 地图名称
+                  placeholder: 例如 factory_map_b1
+                  help_text: 地图名称将作为重定位输入参数
+                  allow_empty: false
+                output:
+                  store_as: map_name
+                  type: raw_input
+              assert_ref: rule_relocalize_triggered
+              failure_message: 重定位动作未成功触发
+              success_message: 已成功触发重定位动作
+
+            - type: action
+              name: select_recovery_zone
+              display_name: 选择当前所在恢复区域
+              tool_name: set_recovery_zone
+              arguments:
+                robot_id: "{{ robot_id }}"
+                recovery_zone:
+                  from_context: recovery_zone
+              require_confirmation: true
+              confirmation:
+                when: before
+                mode: select
+                message: 请让客户从以下恢复区域中选择当前机器人所在区域
+                input:
+                  type: text
+                  auto_select_if_single: false
+                  options:
+                    - label: B1 入口
+                      value: zone_b1_entry
+                    - label: B1 中部
+                      value: zone_b1_middle
+                    - label: B1 末端
+                      value: zone_b1_end
+                output:
+                  store_as: recovery_zone
+                  type: selected_option_value
+              assert:
+                type: compare
+                field: result.zone
+                op: equals
+                value:
+                  from_context: recovery_zone
+              failure_message: 恢复区域设置失败
+              success_message: 已设置恢复区域
+
+            - type: condition
+              name: verify_localization_after_recovery
+              display_name: 检查重定位后是否恢复定位
+              tool_name: check_localization
+              arguments:
+                robot_id: "{{ robot_id }}"
+              assert_ref: rule_localized
+              wait_seconds: 3
+              confirm_times: 2
+              failure_message: 重定位后仍未恢复定位
+
+            - type: condition
+              name: verify_pose_age_recent
+              display_name: 检查定位时间戳是否有效
+              tool_name: check_localization_detail
+              arguments:
+                robot_id: "{{ robot_id }}"
+              assert_ref: rule_pose_recent
+              failure_message: 定位时间戳过旧
+
+            - type: selector
+              name: choose_next_branch
+              display_name: 判断后续处理分支
+              children:
+                - type: condition
+                  name: localization_quality_ok
+                  display_name: 检查定位质量是否达标
+                  tool_name: check_localization_quality
+                  arguments:
+                    robot_id: "{{ robot_id }}"
+                  assert:
+                    type: compare
+                    field: result.score
+                    op: greater_or_equal
+                    value: 80
+                    cast: number
+                  success_message: 定位质量满足要求
+
+                - type: call_playbook
+                  name: fallback_to_map_mismatch
+                  display_name: 转入地图不匹配排查
+                  playbook_id: localization_map_mismatch
+                  failure_message: 子 playbook 执行后仍未恢复
+
+        - type: result
+          name: localization_not_recovered
+          display_name: 定位仍未恢复，需现场处理
+          status: failure
+          message: 当前仍然没有定位，需要现场继续处理
+
+    escalation_notes:
+      - 如果连续三次恢复失败，转人工处理
+      - 如果客户无法提供地图名称，联系实施同学确认现场配置
+
+    execution_notes:
+      - robot_id 需要由外部 tool_context 提供
+      - 当前示例覆盖 approve / input / select 三种确认模式
+      - select 当前只支持静态 options
+
+global_rules:
+  - 恢复前必须获得操作员确认
+  - 如果没有 map_name，必须先向客户索取
+  - 恢复后必须至少连续两次确认定位恢复

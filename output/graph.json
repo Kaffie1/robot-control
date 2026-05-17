@@ -1,0 +1,145 @@
+{
+  "title": "没有定位 - 全要素示例",
+  "nodes": [
+    {
+      "id": "f202e6b2-7193-44e9-be1b-1ee94db6770e",
+      "title": "localization_root",
+      "kind": "selector",
+      "status": "waiting",
+      "tool_name": "",
+      "detail": "类型: selector"
+    },
+    {
+      "id": "bf0d87f6-5b7b-4231-9657-cbbb1fbff303",
+      "title": "already_localized",
+      "kind": "condition",
+      "status": "waiting",
+      "tool_name": "check_localization",
+      "detail": "类型: condition\n工具: check_localization\n成功: 当前已有定位，无需恢复\n规则: rule_localized"
+    },
+    {
+      "id": "db286bff-b10c-47e5-99b8-faf75e2fae30",
+      "title": "try_recover_localization",
+      "kind": "sequence",
+      "status": "waiting",
+      "tool_name": "",
+      "detail": "类型: sequence"
+    },
+    {
+      "id": "309278d6-49a0-4a15-89fc-023f97eea97c",
+      "title": "operator_approve_recovery",
+      "kind": "action",
+      "status": "waiting",
+      "tool_name": "record_operator_approval",
+      "detail": "类型: action\n工具: record_operator_approval\n成功: 已确认允许执行恢复动作\n失败: 操作员未确认恢复动作"
+    },
+    {
+      "id": "248f270a-9849-4cb1-b2ce-72e087bc3fa8",
+      "title": "ask_customer_map_name",
+      "kind": "action",
+      "status": "waiting",
+      "tool_name": "trigger_relocalization",
+      "detail": "类型: action\n工具: trigger_relocalization\n成功: 已成功触发重定位动作\n失败: 重定位动作未成功触发\n规则: rule_relocalize_triggered"
+    },
+    {
+      "id": "dc10fa02-ef37-4401-85ac-e2555a486ced",
+      "title": "select_recovery_zone",
+      "kind": "action",
+      "status": "waiting",
+      "tool_name": "set_recovery_zone",
+      "detail": "类型: action\n工具: set_recovery_zone\n成功: 已设置恢复区域\n失败: 恢复区域设置失败"
+    },
+    {
+      "id": "e63c2ea3-a196-441e-b03d-90d5aadcb89d",
+      "title": "verify_localization_after_recovery",
+      "kind": "condition",
+      "status": "waiting",
+      "tool_name": "check_localization",
+      "detail": "类型: condition\n工具: check_localization\n失败: 重定位后仍未恢复定位\n规则: rule_localized\n等待: 3 秒\n确认次数: 2"
+    },
+    {
+      "id": "184cbb67-27b9-470b-906f-dd2d8589d9a8",
+      "title": "verify_pose_age_recent",
+      "kind": "condition",
+      "status": "waiting",
+      "tool_name": "check_localization_detail",
+      "detail": "类型: condition\n工具: check_localization_detail\n失败: 定位时间戳过旧\n规则: rule_pose_recent"
+    },
+    {
+      "id": "cbcf6e15-998c-4918-8094-f7d249fb3ed7",
+      "title": "choose_next_branch",
+      "kind": "selector",
+      "status": "waiting",
+      "tool_name": "",
+      "detail": "类型: selector"
+    },
+    {
+      "id": "8ca8d559-f7ea-474c-91ce-d1adc02acd9e",
+      "title": "localization_quality_ok",
+      "kind": "condition",
+      "status": "waiting",
+      "tool_name": "check_localization_quality",
+      "detail": "类型: condition\n工具: check_localization_quality\n成功: 定位质量满足要求"
+    },
+    {
+      "id": "c4f816d0-0a62-4553-8fa9-b02bed8bb586",
+      "title": "fallback_to_map_mismatch",
+      "kind": "call_playbook",
+      "status": "waiting",
+      "tool_name": "",
+      "detail": "类型: call_playbook\n失败: 子 playbook 执行后仍未恢复"
+    }
+  ],
+  "edges": [
+    {
+      "source": "f202e6b2-7193-44e9-be1b-1ee94db6770e",
+      "target": "bf0d87f6-5b7b-4231-9657-cbbb1fbff303",
+      "label": "正常路径"
+    },
+    {
+      "source": "f202e6b2-7193-44e9-be1b-1ee94db6770e",
+      "target": "db286bff-b10c-47e5-99b8-faf75e2fae30",
+      "label": "异常恢复"
+    },
+    {
+      "source": "db286bff-b10c-47e5-99b8-faf75e2fae30",
+      "target": "309278d6-49a0-4a15-89fc-023f97eea97c",
+      "label": ""
+    },
+    {
+      "source": "db286bff-b10c-47e5-99b8-faf75e2fae30",
+      "target": "248f270a-9849-4cb1-b2ce-72e087bc3fa8",
+      "label": ""
+    },
+    {
+      "source": "db286bff-b10c-47e5-99b8-faf75e2fae30",
+      "target": "dc10fa02-ef37-4401-85ac-e2555a486ced",
+      "label": ""
+    },
+    {
+      "source": "db286bff-b10c-47e5-99b8-faf75e2fae30",
+      "target": "e63c2ea3-a196-441e-b03d-90d5aadcb89d",
+      "label": ""
+    },
+    {
+      "source": "db286bff-b10c-47e5-99b8-faf75e2fae30",
+      "target": "184cbb67-27b9-470b-906f-dd2d8589d9a8",
+      "label": ""
+    },
+    {
+      "source": "db286bff-b10c-47e5-99b8-faf75e2fae30",
+      "target": "cbcf6e15-998c-4918-8094-f7d249fb3ed7",
+      "label": ""
+    },
+    {
+      "source": "cbcf6e15-998c-4918-8094-f7d249fb3ed7",
+      "target": "8ca8d559-f7ea-474c-91ce-d1adc02acd9e",
+      "label": "正常路径"
+    },
+    {
+      "source": "cbcf6e15-998c-4918-8094-f7d249fb3ed7",
+      "target": "c4f816d0-0a62-4553-8fa9-b02bed8bb586",
+      "label": "异常恢复"
+    }
+  ]
+}

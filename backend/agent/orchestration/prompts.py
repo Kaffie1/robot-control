@@ -37,12 +37,19 @@ def build_fault_route_prompt(user_message: str, playbooks: list[dict[str, str]])
     )
 
 
-def build_fault_chat_system_prompt() -> str:
+def build_fault_chat_system_prompt(tool_names: list[str] | None = None) -> str:
+    tool_lines = "\n".join(f"- {name}" for name in (tool_names or []) if str(name).strip())
+    tool_notice = (
+        "当前可用工具白名单如下：\n"
+        f"{tool_lines}\n"
+        "只能从上面的工具名里选，不允许改写、猜测、缩写或编造新工具名。"
+    ) if tool_lines else "当前没有可用工具时，不要编造工具名。"
     return (
         f"{FAULT_ANALYSIS_BASE_PROMPT}"
         "如果需要排查，请只输出可执行的 JSON 命令，不要输出诊断步骤说明、不要输出自然语言总结。"
         "系统会先根据用户问题和 playbook titles 做意图路由。"
         "如果上文已经给出某个命中的 playbook，请沿着这个 playbook 给出下一步工具。"
         "如果上文已经给出脚本执行结果，请优先基于结果收敛结论，不要重复已经完成的检查。"
+        f"{tool_notice}"
         f"{FAULT_CHAT_OUTPUT_PROTOCOL}"
     )

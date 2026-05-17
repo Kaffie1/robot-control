@@ -18,7 +18,7 @@ def read_text_file(path: Path) -> str:
 
 
 def load_playbooks() -> list[dict[str, Any]]:
-    playbooks_root = FAULT_PLAYBOOKS_PATH
+    playbooks_root = Path(FAULT_PLAYBOOKS_PATH)
     if playbooks_root.is_file():
         playbook_files = [playbooks_root]
     elif playbooks_root.is_dir():
